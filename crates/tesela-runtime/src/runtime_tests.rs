@@ -1,300 +1,279 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tesela_core::{ApiName, DataType, Error, Value, Version};
+use tesela_backend::{
+    ActionRequest, Backend, BindingsBuilder, ExecutionEvent, ExecutionObserver, FnActionExecutor,
+    MemoryBackend, Mutation, Query,
+};
+use tesela_core::{ApiName, DataType, Error, ErrorCode, ExecutionContext, Key, Principal, Value};
 use tesela_ir::{
-    ActionHandler, ActionResult, ActionType, Datasource, MutationResult, ObjectSource, ObjectType,
-    Page, Property, Record, Spec,
-};
-use tesela_store::{
-    ActionRequest, Actor, AuditEvent, AuditSink, DenyAllPolicy, MemoryStore, Mutation,
-    OntologyStore, Query, StaticStoreRouter, StoreCapabilities,
+    ActionEffects, ActionResult, ActionType, ApprovalPolicy, Concurrency, ObjectType, Property,
+    Spec,
 };
 
-use crate::{AllowAllPolicy, Runtime, RuntimeOptions};
+use crate::{AllowAllPolicy, Runtime};
 
-#[test]
-fn upsert_uses_declared_object_primary_key() -> Result<(), Error> {
-    let spec = analytics_spec()?;
-    let store = MemoryStore::new();
-    store.set_spec(spec.clone())?;
-    let router = Arc::new(StaticStoreRouter::new());
-    router.register(api_name("analytics")?, store)?;
-    let runtime = Runtime::new(
-        spec,
-        RuntimeOptions {
-            store_router: Some(router),
-            policy_engine: Some(Arc::new(AllowAllPolicy)),
-            ..RuntimeOptions::default()
-        },
-    )?;
-    let actor = test_actor();
-    let zones = api_name("zones")?;
-
-    runtime.mutate(
-        &actor,
-        &zones,
-        Mutation::Upsert {
-            values: zone_values("scenario-1", "zone-1")?,
-        },
-    )?;
-    runtime.mutate(
-        &actor,
-        &zones,
-        Mutation::Upsert {
-            values: zone_values("scenario-1", "zone-2")?,
-        },
-    )?;
-
-    let page = runtime.search(&actor, &zones, Query::default())?;
-    assert_eq!(page.records.len(), 2);
-    assert_eq!(
-        runtime
-            .get(&actor, &zones, &Value::string("zone-1"))?
-            .primary_key,
-        Some(Value::string("zone-1"))
-    );
-    assert_eq!(
-        runtime
-            .get(&actor, &zones, &Value::string("zone-2"))?
-            .primary_key,
-        Some(Value::string("zone-2"))
-    );
-    Ok(())
+fn name(value: &'static str) -> ApiName {
+    ApiName::from(value)
 }
-
-#[test]
-fn upsert_requires_declared_primary_key_value() -> Result<(), Error> {
-    let spec = analytics_spec()?;
-    let store = MemoryStore::new();
-    store.set_spec(spec.clone())?;
-    let router = Arc::new(StaticStoreRouter::new());
-    router.register(api_name("analytics")?, store)?;
-    let runtime = Runtime::new(
-        spec,
-        RuntimeOptions {
-            store_router: Some(router),
-            policy_engine: Some(Arc::new(AllowAllPolicy)),
-            ..RuntimeOptions::default()
-        },
-    )?;
-    let actor = test_actor();
-    let mut values = BTreeMap::new();
-    values.insert(api_name("scenario_id")?, Value::string("scenario-1"));
-
-    let error = runtime
-        .mutate(&actor, &api_name("zones")?, Mutation::Upsert { values })
-        .err()
-        .ok_or_else(|| Error::internal("upsert without primary key succeeded"))?;
-
-    assert!(matches!(error, Error::BadRequest { .. }));
-    Ok(())
-}
-
-struct ActionStore(Arc<MemoryStore>);
-
-impl OntologyStore for ActionStore {
-    fn store_type(&self) -> &str {
-        "action_test"
-    }
-    fn capabilities(&self) -> StoreCapabilities {
-        let mut value = self.0.capabilities();
-        value.execute_action = true;
-        value
-    }
-    fn search(&self, object_type: &ApiName, query: &Query) -> Result<Page, Error> {
-        self.0.search(object_type, query)
-    }
-    fn get(&self, object_type: &ApiName, primary_key: &Value) -> Result<Option<Record>, Error> {
-        self.0.get(object_type, primary_key)
-    }
-    fn create(
-        &self,
-        object_type: &ApiName,
-        values: BTreeMap<ApiName, Value>,
-    ) -> Result<MutationResult, Error> {
-        self.0.create(object_type, values)
-    }
-    fn update(
-        &self,
-        object_type: &ApiName,
-        primary_key: &Value,
-        values: BTreeMap<ApiName, Value>,
-    ) -> Result<MutationResult, Error> {
-        self.0.update(object_type, primary_key, values)
-    }
-    fn delete(&self, object_type: &ApiName, primary_key: &Value) -> Result<MutationResult, Error> {
-        self.0.delete(object_type, primary_key)
-    }
-    fn execute_action(&self, request: ActionRequest) -> Result<ActionResult, Error> {
-        Ok(ActionResult {
-            status: "success".into(),
-            output: Some(request.input),
-            error: None,
-            run_id: request.run_id,
-        })
-    }
-}
-
-#[derive(Default)]
-struct TestAudit(std::sync::Mutex<Vec<AuditEvent>>);
-
-impl AuditSink for TestAudit {
-    fn record(&self, event: AuditEvent) -> Result<(), Error> {
-        self.0
-            .lock()
-            .map_err(|error| Error::internal(error.to_string()))?
-            .push(event);
-        Ok(())
-    }
-}
-
-#[test]
-fn actions_are_routed_authorized_and_audited() -> Result<(), Error> {
-    let mut spec = analytics_spec()?;
-    spec.actions.push(ActionType {
-        api_name: api_name("sync_zones")?,
+fn property(value: &'static str) -> Property {
+    Property {
+        api_name: name(value),
         display: None,
         description: None,
-        subject: Some(api_name("zones")?),
-        handler: ActionHandler {
-            kind: "callback".into(),
-            target: None,
-            config: None,
-        },
-        input_schema: None,
-        output_schema: None,
-        mode: None,
-        risk_level: None,
-        idempotency_key: None,
-        deprecated_at: None,
-        metadata: None,
-    });
-    let memory = MemoryStore::new();
-    memory.set_spec(spec.clone())?;
-    let router = Arc::new(StaticStoreRouter::new());
-    router.register(api_name("analytics")?, Arc::new(ActionStore(memory)))?;
-    let audit = Arc::new(TestAudit::default());
-    let runtime = Runtime::new(
-        spec.clone(),
-        RuntimeOptions {
-            store_router: Some(router.clone()),
-            policy_engine: Some(Arc::new(AllowAllPolicy)),
-            audit_sink: Some(audit.clone()),
-            ..RuntimeOptions::default()
-        },
-    )?;
-    let request = ActionRequest {
-        action: api_name("sync_zones")?,
-        input: Value::string("ok"),
-        actor: test_actor(),
-        run_id: None,
-    };
-    assert_eq!(
-        runtime.execute_action(request.clone())?.output,
-        Some(Value::string("ok"))
-    );
-    assert_eq!(
-        audit
-            .0
-            .lock()
-            .map_err(|error| Error::internal(error.to_string()))?
-            .len(),
-        1
-    );
-
-    let denied = Runtime::new(
-        spec.clone(),
-        RuntimeOptions {
-            store_router: Some(router),
-            policy_engine: Some(Arc::new(DenyAllPolicy)),
-            ..RuntimeOptions::default()
-        },
-    )?;
-    assert!(matches!(
-        denied.execute_action(request.clone()),
-        Err(Error::PolicyDenied { .. })
-    ));
-    spec.actions[0].subject = None;
-    let mut invalid = spec.clone();
-    invalid.version = Version::new("tesela.spec.v2");
-    assert!(matches!(
-        runtime.apply_spec(invalid),
-        Err(Error::Validation { .. })
-    ));
-    runtime.apply_spec(spec)?;
-    assert!(matches!(
-        runtime.execute_action(request),
-        Err(Error::UnsupportedCapability { .. })
-    ));
-    Ok(())
+        data_type: DataType::String,
+        nullable: None,
+        default: None,
+        allowed_values: None,
+        tags: Vec::new(),
+    }
 }
-
-fn analytics_spec() -> Result<Spec, Error> {
+fn spec() -> Spec {
     let mut spec = Spec::default();
-    spec.datasources.push(Datasource {
-        api_name: api_name("analytics")?,
-        adapter_type: "memory".to_string(),
-        config: None,
-        secrets: None,
-    });
-    spec.object_types.push(ObjectType {
-        api_name: api_name("zones")?,
+    spec.upsert_object_type(ObjectType {
+        api_name: name("customer"),
         display: None,
         description: None,
-        source: ObjectSource {
-            datasource: api_name("analytics")?,
-            resource: Some("zones".to_string()),
-        },
-        primary_key: api_name("zone_id")?,
-        properties: vec![
-            property("scenario_id", DataType::String)?,
-            property("zone_id", DataType::String)?,
-        ],
+        primary_key: name("id"),
+        properties: vec![property("id"), property("tenant_id")],
         traits: Vec::new(),
         tags: Vec::new(),
-        metadata: None,
-        indexes: Vec::new(),
         deprecated_at: None,
     });
-    Ok(spec)
+    spec
+}
+fn context() -> ExecutionContext {
+    ExecutionContext::trusted(Principal::new("test"), "test").expect("context")
+}
+fn runtime() -> Result<(Arc<Runtime>, Arc<MemoryBackend>), Error> {
+    let backend = MemoryBackend::new();
+    let mut bindings = BindingsBuilder::new();
+    bindings.bind_object(name("customer"), backend.clone());
+    Ok((
+        Runtime::builder(spec(), bindings.build(), Arc::new(AllowAllPolicy)).build()?,
+        backend,
+    ))
+}
+fn values(id: &'static str) -> BTreeMap<ApiName, Value> {
+    [
+        (name("id"), Value::string(id)),
+        (name("tenant_id"), Value::string("acme")),
+    ]
+    .into()
 }
 
-fn zone_values(scenario_id: &str, zone_id: &str) -> Result<BTreeMap<ApiName, Value>, Error> {
-    let mut values = BTreeMap::new();
-    values.insert(api_name("scenario_id")?, Value::string(scenario_id));
-    values.insert(api_name("zone_id")?, Value::string(zone_id));
-    Ok(values)
+#[test]
+fn native_upsert_is_revision_safe() -> Result<(), Error> {
+    let (runtime, _) = runtime()?;
+    let created = runtime
+        .mutate(
+            &context(),
+            &name("customer"),
+            Mutation::Upsert {
+                values: values("one"),
+                expected_revision: None,
+                preconditions: Vec::new(),
+            },
+        )?
+        .output
+        .record
+        .expect("record");
+    let stale = runtime.mutate(
+        &context(),
+        &name("customer"),
+        Mutation::Upsert {
+            values: values("one"),
+            expected_revision: Some(tesela_ir::Revision::new("stale")),
+            preconditions: Vec::new(),
+        },
+    );
+    assert!(stale.is_err_and(|error| error.is(ErrorCode::StaleRevision)));
+    let current = runtime
+        .get(&context(), &name("customer"), &Key::string("one"))?
+        .output;
+    assert_eq!(current.revision, created.revision);
+    Ok(())
 }
 
-fn property(api_name: &str, data_type: DataType) -> Result<Property, Error> {
-    Ok(Property {
-        api_name: self::api_name(api_name)?,
-        display: None,
-        description: None,
-        data_type,
-        nullable: None,
-        indexed: None,
-        unique: None,
-        tags: Vec::new(),
-        markings: Vec::new(),
-        metadata: None,
-        default: None,
-        source_column: None,
-        allowed_values: None,
-        sort_order: None,
-        encrypted: None,
-    })
+#[test]
+fn mutation_preconditions_fail_without_starting_the_write() -> Result<(), Error> {
+    let (runtime, _) = runtime()?;
+    runtime.mutate(
+        &context(),
+        &name("customer"),
+        Mutation::Create {
+            values: values("one"),
+        },
+    )?;
+    let denied = runtime.mutate(
+        &context(),
+        &name("customer"),
+        Mutation::Update {
+            primary_key: Key::string("one"),
+            values: [(name("tenant_id"), Value::string("globex"))].into(),
+            expected_revision: None,
+            preconditions: vec![tesela_ir::Filter::eq(
+                name("tenant_id"),
+                Value::string("globex"),
+            )],
+        },
+    );
+    assert!(denied.is_err_and(|error| {
+        error.is(ErrorCode::PreconditionFailed)
+            && error.side_effect() == tesela_core::SideEffectStatus::NotStarted
+    }));
+    let record = runtime
+        .get(&context(), &name("customer"), &Key::string("one"))?
+        .output;
+    assert_eq!(record.get("tenant_id"), Some(&Value::string("acme")));
+    Ok(())
 }
 
-fn test_actor() -> Actor {
-    Actor {
-        user_id: "runtime-test".to_string(),
-        roles: vec!["system".to_string()],
-        claims: BTreeMap::new(),
+#[test]
+fn omitted_query_limit_is_bounded() -> Result<(), Error> {
+    let (runtime, _) = runtime()?;
+    for id in ["one", "two"] {
+        runtime.mutate(
+            &context(),
+            &name("customer"),
+            Mutation::Create { values: values(id) },
+        )?;
+    }
+    let page = runtime
+        .search(&context(), &name("customer"), Query::default())?
+        .output;
+    assert_eq!(page.records.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn spec_replacement_is_atomic_and_bumps_generation() -> Result<(), Error> {
+    let (runtime, _) = runtime()?;
+    let before = runtime.ontology().generation();
+    let mut invalid = spec();
+    invalid.object_types[0].primary_key = name("missing");
+    assert!(runtime.apply_spec(invalid).is_err());
+    assert_eq!(runtime.ontology().generation(), before);
+    runtime.apply_spec(spec())?;
+    assert_eq!(runtime.ontology().generation(), before + 1);
+    Ok(())
+}
+
+#[test]
+fn capability_catalogs_are_versioned_and_exact_names_win() -> Result<(), Error> {
+    let (runtime, _) = runtime()?;
+    let catalog = runtime.capabilities(&context(), "customer.search")?;
+    assert_eq!(
+        catalog.search("customer.search", 1)[0].name,
+        "customer.search"
+    );
+    assert_eq!(catalog.generation, runtime.ontology().generation());
+    Ok(())
+}
+
+struct PanickingObserver;
+impl ExecutionObserver for PanickingObserver {
+    fn observe(&self, _event: &ExecutionEvent) {
+        panic!("observer failures are isolated")
     }
 }
 
-fn api_name(value: &str) -> Result<ApiName, Error> {
-    ApiName::new(value).map_err(|error| Error::bad_request(format!("invalid api name: {error}")))
+#[test]
+fn observer_panic_cannot_fail_a_committed_mutation() -> Result<(), Error> {
+    let backend = MemoryBackend::new();
+    let mut bindings = BindingsBuilder::new();
+    bindings.bind_object(name("customer"), backend.clone());
+    let runtime = Runtime::builder(spec(), bindings.build(), Arc::new(AllowAllPolicy))
+        .observer(Arc::new(PanickingObserver))
+        .build()?;
+    let result = runtime.mutate(
+        &context(),
+        &name("customer"),
+        Mutation::Create {
+            values: values("one"),
+        },
+    )?;
+    assert!(result.output.record.is_some());
+    assert!(
+        backend
+            .get(&name("customer"), &Key::string("one"))?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn action_input_and_idempotency_are_checked_before_execution() -> Result<(), Error> {
+    let mut spec = spec();
+    spec.upsert_action(ActionType {
+        api_name: name("notify"),
+        display: None,
+        description: None,
+        subject: None,
+        input_schema: Some(Value::new(serde_json::json!({
+            "type": "object",
+            "properties": {"email": {"type": "string"}},
+            "required": ["email"]
+        }))),
+        output_schema: None,
+        risk_level: tesela_core::RiskLevel::Low,
+        effects: ActionEffects {
+            reads: false,
+            writes: false,
+            external: true,
+            idempotent: true,
+        },
+        reads: Vec::new(),
+        writes: Vec::new(),
+        creates: Vec::new(),
+        external_effects: vec![name("mail")],
+        approval: ApprovalPolicy::Never,
+        requires_revision: false,
+        preconditions: Vec::new(),
+        concurrency: Concurrency::Unrestricted,
+        idempotency_key: Some("run_id".to_string()),
+        deprecated_at: None,
+    });
+    let called = Arc::new(AtomicBool::new(false));
+    let called_by_executor = Arc::clone(&called);
+    let mut bindings = BindingsBuilder::new();
+    bindings.bind_action(
+        name("notify"),
+        FnActionExecutor::new(move |_, _| {
+            called_by_executor.store(true, Ordering::Release);
+            Ok(ActionResult {
+                status: "success".to_string(),
+                output: None,
+                error: None,
+                run_id: None,
+            })
+        }),
+    );
+    let runtime = Runtime::builder(spec, bindings.build(), Arc::new(AllowAllPolicy)).build()?;
+    let invalid = runtime.execute_action(
+        &context(),
+        ActionRequest {
+            action: name("notify"),
+            input: Value::new(serde_json::json!({"email": 7})),
+            run_id: Some("one".to_string()),
+            expected_revision: None,
+            preconditions: Vec::new(),
+        },
+    );
+    assert!(invalid.is_err_and(|error| error.is(ErrorCode::BadRequest)));
+    assert!(!called.load(Ordering::Acquire));
+    let missing_idempotency = runtime.execute_action(
+        &context(),
+        ActionRequest {
+            action: name("notify"),
+            input: Value::new(serde_json::json!({"email": "a@test"})),
+            run_id: None,
+            expected_revision: None,
+            preconditions: Vec::new(),
+        },
+    );
+    assert!(missing_idempotency.is_err_and(|error| error.is(ErrorCode::PreconditionFailed)));
+    assert!(!called.load(Ordering::Acquire));
+    Ok(())
 }

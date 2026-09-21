@@ -16,13 +16,17 @@ pub(crate) fn to_snake_case(s: &str) -> String {
 }
 
 /// Map a Rust type path (as a string slice) to a Tesela data type variant.
-pub(crate) fn rust_type_to_data_type(ty_str: &str) -> proc_macro2::TokenStream {
-    match ty_str
-        .trim_start_matches("Option<")
-        .trim_end_matches('>')
-        .trim()
-    {
-        "String" | "&str" | "str" => quote!(::tesela::__private::DataType::String),
+pub(crate) fn rust_type_to_data_type(ty_str: &str) -> syn::Result<proc_macro2::TokenStream> {
+    let ty = ty_str
+        .strip_prefix("Option<")
+        .or_else(|| ty_str.strip_prefix("std::option::Option<"))
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(ty_str)
+        .trim();
+    let value = match ty {
+        "String" | "std::string::String" | "&str" | "str" => {
+            quote!(::tesela::__private::DataType::String)
+        }
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize" => {
             quote!(::tesela::__private::DataType::Integer)
         }
@@ -30,8 +34,27 @@ pub(crate) fn rust_type_to_data_type(ty_str: &str) -> proc_macro2::TokenStream {
         "bool" => quote!(::tesela::__private::DataType::Boolean),
         "uuid::Uuid" | "Uuid" => quote!(::tesela::__private::DataType::Uuid),
         "serde_json::Value" | "Value" => quote!(::tesela::__private::DataType::Json),
-        _ => quote!(::tesela::__private::DataType::String),
-    }
+        "rust_decimal::Decimal" | "Decimal" => quote!(::tesela::__private::DataType::Decimal),
+        "chrono::NaiveDate" | "NaiveDate" => quote!(::tesela::__private::DataType::Date),
+        "chrono::NaiveDateTime" | "NaiveDateTime" => {
+            quote!(::tesela::__private::DataType::Timestamp)
+        }
+        "chrono::DateTime<chrono::Utc>" | "DateTime<Utc>" => {
+            quote!(::tesela::__private::DataType::TimestampTz)
+        }
+        value if value.starts_with("Vec<") || value.starts_with('[') => {
+            quote!(::tesela::__private::DataType::Array)
+        }
+        _ => {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "unsupported field type `{ty_str}`; use a supported scalar or #[tesela(data_type = ...)]"
+                ),
+            ));
+        }
+    };
+    Ok(value)
 }
 
 /// Return whether the type string represents an `Option<T>`.
@@ -54,7 +77,7 @@ pub(crate) fn string_value(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result
     Ok(meta.value()?.parse::<syn::LitStr>()?.value())
 }
 
-/// Field-level `#[tesela(...)]` arguments, shared by `ObjectType` and `TraitDef`.
+/// Field-level `#[tesela(...)]` arguments, shared by `Object` and `Trait`.
 #[derive(Debug, Default)]
 pub(crate) struct FieldArgs {
     pub(crate) nullable: bool,

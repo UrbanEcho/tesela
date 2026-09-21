@@ -1,4 +1,4 @@
-//! `#[derive(TraitDef)]` derive macro implementation.
+//! `#[derive(Trait)]` implementation.
 
 use crate::helpers::{
     is_option, parse_field_args, rust_type_to_data_type, string_value, tesela_attrs, to_snake_case,
@@ -45,14 +45,14 @@ fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
             _ => {
                 return Err(syn::Error::new(
                     struct_name.span(),
-                    "TraitDef requires a struct with named fields",
+                    "Trait requires a struct with named fields",
                 ));
             }
         },
         _ => {
             return Err(syn::Error::new(
                 struct_name.span(),
-                "TraitDef can only be applied to structs",
+                "Trait can only be applied to structs",
             ));
         }
     };
@@ -62,13 +62,13 @@ fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
         let field_name = field
             .ident
             .as_ref()
-            .ok_or_else(|| syn::Error::new(field.span(), "TraitDef requires named fields"))?
+            .ok_or_else(|| syn::Error::new(field.span(), "Trait requires named fields"))?
             .to_string();
         let ty_str = type_to_string(&field.ty);
         let field_args = parse_field_args(&field.attrs)?;
         let data_type = match &field_args.data_type {
             Some(data_type) => quote!(#data_type),
-            None => rust_type_to_data_type(&ty_str),
+            None => rust_type_to_data_type(&ty_str)?,
         };
         let field_nullable = field_args.nullable || is_option(&ty_str);
         let field_description = match field_args.description {
@@ -91,9 +91,8 @@ fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     Ok(quote! {
-        impl #struct_name {
-            /// Return the Tesela `Trait` definition for this struct.
-            pub fn tesela_trait() -> ::tesela::__private::Trait {
+        impl ::tesela::Trait for #struct_name {
+            fn definition() -> ::tesela::__private::Trait {
                 ::tesela::__private::Trait {
                     api_name: ::tesela::__private::ApiName::new_unchecked(#api_name),
                     display: #display,
@@ -121,7 +120,7 @@ fn parse_trait_args(input: &DeriveInput) -> syn::Result<TraitArgs> {
                 args.description = Some(meta.value()?.parse()?);
                 return Ok(());
             }
-            Err(unsupported_attr(&meta, "TraitDef"))
+            Err(unsupported_attr(&meta, "Trait"))
         })?;
     }
     Ok(args)

@@ -15,16 +15,8 @@
 //! attribute, and this list is deliberately documentation rather than a table
 //! in the error path.
 //!
-//! # Derive macros
-//!
-//! * `ObjectType` — derive a `tesela::model::ObjectType` from a struct.
-//! * `LinkType` — derive a `tesela::model::LinkType` from a struct.
-//! * `TraitDef` — derive a `tesela::model::Trait` from a struct.
-//!
-//! # Attribute macros
-//!
-//! * `action` — derive a `tesela::model::ActionType` from a free function, and
-//!   infer an input schema from its parameters.
+//! The `Object`, `Link`, `Trait`, and `Action` derives implement the typed
+//! semantic facade. Definitions contain no executable code or storage mapping.
 
 mod action_macro;
 mod helpers;
@@ -34,55 +26,40 @@ mod trait_macro;
 
 use proc_macro::TokenStream;
 
-/// Derive `tesela_object_type()` for a struct.
+/// Derive a typed semantic object for a struct.
 ///
-/// Struct-level: `#[tesela(primary_key = "id", name = "...", display = "...", description = "...")]`
+/// Struct-level: `#[tesela(key = id, name = "...", display = "...", description = "...")]`
 /// Field-level: `#[tesela(nullable, data_type = tesela::model::DataType::TimestampTz, description = "...")]`
 ///
-/// `primary_key` is required. A record's identity is part of its meaning, so
+/// `key` is required. A record's identity is part of its meaning, so
 /// the macro will not invent one.
-#[proc_macro_derive(ObjectType, attributes(tesela))]
-pub fn derive_object_type(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(Object, attributes(tesela))]
+pub fn derive_object(input: TokenStream) -> TokenStream {
     object_type_macro::expand(input)
 }
 
-/// Marks a free function as a Tesela `ActionType` and generates a
-/// companion struct with a `tesela_action_type()` associated function.
-///
-/// The function itself is left untouched and stays callable; the declaration
-/// says what the action is, and the host binds an executor to it at runtime.
-///
-/// # Arguments
-///
-/// * `subject` — object type the action acts on. The backend bound to that
-///   object type executes the action.
-/// * `risk` — `"low"` (default), `"medium"` or `"high"`.
-/// * `effects` — `"read_only"`, `"write"` (default) or `"external"`.
-/// * `idempotent` — flag: repeating the action with the same input is safe.
-/// * `concurrency` — `"serial"` (default), `"optimistic"` or `"unrestricted"`.
-/// * `display` — human-readable label (default: function name).
-/// * `description` — action description.
-#[proc_macro_attribute]
-pub fn action(args: TokenStream, input: TokenStream) -> TokenStream {
-    action_macro::expand(args, input)
+/// Derive a typed action command with explicit effects and output type.
+#[proc_macro_derive(Action, attributes(tesela))]
+pub fn derive_action(input: TokenStream) -> TokenStream {
+    action_macro::expand(input)
 }
 
-/// Derive `tesela_link_type()` for a struct.
+/// Derive a typed semantic link.
 ///
-/// Struct-level: `#[tesela(from = "...", to = "...", cardinality = "one_to_many", inverse = "...", name = "...", display = "...")]`
+/// Struct-level: `#[tesela(from = Source, to = Target, cardinality = many)]`.
 ///
 /// `from` and `to` are required. The derived link type is directional and
 /// carries no storage mapping: a host binds a link to a resolver by link id.
-#[proc_macro_derive(LinkType, attributes(tesela))]
-pub fn derive_link_type(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(Link, attributes(tesela))]
+pub fn derive_link(input: TokenStream) -> TokenStream {
     link_macro::expand(input)
 }
 
-/// Derive `tesela_trait()` for a struct.
+/// Derive a reusable semantic trait definition.
 ///
 /// Struct-level: `#[tesela(name = "...", display = "...", description = "...")]`
 /// Field-level: `#[tesela(nullable, data_type = ..., description = "...")]`
-#[proc_macro_derive(TraitDef, attributes(tesela))]
-pub fn derive_trait_def(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(Trait, attributes(tesela))]
+pub fn derive_trait(input: TokenStream) -> TokenStream {
     trait_macro::expand(input)
 }

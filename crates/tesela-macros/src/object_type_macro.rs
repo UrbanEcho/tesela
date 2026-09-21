@@ -1,143 +1,108 @@
-//! `#[derive(ObjectType)]` derive macro implementation.
+//! `#[derive(Object)]` implementation.
 
 use crate::helpers::{
     is_option, parse_field_args, rust_type_to_data_type, tesela_attrs, to_snake_case,
     type_to_string, unsupported_attr,
 };
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::spanned::Spanned;
-use syn::{Attribute, DeriveInput, Expr, LitStr, Result, parse_macro_input};
+use syn::{DeriveInput, Ident, LitStr, parse_macro_input};
 
-#[derive(Debug, Default)]
-struct ObjectTypeArgs {
-    api_name: Option<Expr>,
-    primary_key: Option<Expr>,
+#[derive(Default)]
+struct Args {
+    key: Option<Ident>,
+    name: Option<LitStr>,
     display: Option<LitStr>,
     description: Option<LitStr>,
 }
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    match expand_checked(input) {
-        Ok(tokens) => tokens.into(),
-        Err(error) => error.to_compile_error().into(),
-    }
+    expand_checked(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
-fn expand_checked(input: DeriveInput) -> Result<TokenStream2> {
-    let struct_name = &input.ident;
-    let struct_name_str = struct_name.to_string();
-    let fallback_api_name = to_snake_case(&struct_name_str);
-    let object_args = parse_object_args(&input.attrs)?;
-
-    let primary_key = object_args.primary_key.ok_or_else(|| {
-        syn::Error::new(
-            struct_name.span(),
-            "ObjectType requires #[tesela(primary_key = ...)]: a record's identity is part of its meaning, so it cannot be inferred",
-        )
-    })?;
-    let api_name = api_name_tokens(object_args.api_name, &fallback_api_name);
-    let primary_key = api_name_tokens(Some(primary_key), "");
-    let display = option_lit_tokens(object_args.display);
-    let description = option_lit_tokens(object_args.description);
-
-    let fields = named_fields(&input)?;
-    let mut property_builders = Vec::with_capacity(fields.len());
-    let mut field_descriptors = Vec::with_capacity(fields.len());
-
+fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let args = parse_args(&input)?;
+    let key = args
+        .key
+        .ok_or_else(|| syn::Error::new(name.span(), "Object requires #[tesela(key = field)]"))?;
+    let fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(fields) => fields.named.iter().collect::<Vec<_>>(),
+            _ => return Err(syn::Error::new(name.span(), "Object requires named fields")),
+        },
+        _ => {
+            return Err(syn::Error::new(
+                name.span(),
+                "Object can only be derived for a struct",
+            ));
+        }
+    };
+    let key_field = fields
+        .iter()
+        .find(|field| field.ident.as_ref() == Some(&key))
+        .ok_or_else(|| syn::Error::new(key.span(), "key does not name a struct field"))?;
+    let key_type = &key_field.ty;
+    let api_name = args
+        .name
+        .map_or_else(|| to_snake_case(&name.to_string()), |value| value.value());
+    let display = option_string(args.display);
+    let description = option_string(args.description);
+    let key_name = key.to_string();
+    let mut properties = Vec::new();
+    let mut accessors = Vec::new();
+    let mut encoders = Vec::new();
+    let mut decoders = Vec::new();
+    let mut initializers = Vec::new();
     for field in fields {
-        let field_name = match &field.ident {
-            Some(ident) => ident.to_string(),
-            None => {
-                return Err(syn::Error::new(
-                    field.span(),
-                    "ObjectType requires named fields",
-                ));
-            }
-        };
-        let field_ident = field.ident.as_ref().expect("named field");
-        let field_type = &field.ty;
-        let ty_str = type_to_string(&field.ty);
+        let ident = field.ident.as_ref().expect("named field");
+        let field_name = ident.to_string();
+        let ty = &field.ty;
         let field_args = parse_field_args(&field.attrs)?;
-        let data_type = match &field_args.data_type {
-            Some(data_type) => quote!(#data_type),
-            None => rust_type_to_data_type(&ty_str),
+        let ty_string = type_to_string(ty);
+        let data_type = match field_args.data_type.as_ref() {
+            Some(value) => quote!(#value),
+            None => rust_type_to_data_type(&ty_string)?,
         };
-        let field_nullable = field_args.nullable || is_option(&ty_str);
-        let field_description = option_lit_tokens(field_args.description);
-
-        property_builders.push(quote! {
-            ::tesela::__private::StaticProperty {
-                api_name: #field_name,
-                display: None,
-                description: #field_description,
-                data_type: #data_type,
-                nullable: #field_nullable,
-            }
-        });
-        field_descriptors.push(quote! {
-            /// Typed semantic field descriptor.
-            pub fn #field_ident() -> ::tesela::query::Field<#field_type> {
-                ::tesela::query::Field::new(#field_name)
-            }
-        });
+        let nullable = field_args.nullable || is_option(&ty_string);
+        let description = match field_args.description {
+            Some(value) => quote!(Some(#value.to_string())),
+            None => quote!(None),
+        };
+        properties.push(quote! { ::tesela::__private::Property { api_name: ::tesela::__private::ApiName::new_unchecked(#field_name), display: None, description: #description, data_type: #data_type, nullable: if #nullable { Some(true) } else { None }, default: None, allowed_values: None, tags: Vec::new() } });
+        accessors.push(quote! { #[must_use] pub const fn #ident() -> ::tesela::Field<Self, #ty> { ::tesela::Field::new(#field_name) } });
+        encoders.push(quote! { values.insert(::tesela::__private::ApiName::new_unchecked(#field_name), ::tesela::model::encode_value(&self.#ident)?); });
+        decoders.push(quote! { let #ident: #ty = ::tesela::model::decode_value(record.values.remove(#field_name), #field_name)?; });
+        initializers.push(quote!(#ident));
     }
-
     Ok(quote! {
-        impl ::tesela::__private::ObjectTypeDefinition for #struct_name {
-            fn definition() -> ::tesela::__private::StaticObjectType {
-                const PROPERTIES: &[::tesela::__private::StaticProperty] = &[#(#property_builders),*];
-
-                ::tesela::__private::StaticObjectType {
-                    api_name: #api_name,
-                    display: #display,
-                    description: #description,
-                    primary_key: #primary_key,
-                    properties: PROPERTIES,
-                    traits: &[],
-                    tags: &[],
-                }
+        impl ::tesela::Object for #name {
+            type Key = #key_type;
+            fn definition() -> ::tesela::__private::ObjectType {
+                ::tesela::__private::ObjectType { api_name: ::tesela::__private::ApiName::new_unchecked(#api_name), display: #display, description: #description, primary_key: ::tesela::__private::ApiName::new_unchecked(#key_name), properties: vec![#(#properties),*], traits: Vec::new(), tags: Vec::new(), deprecated_at: None }
             }
+            fn key(&self) -> Result<Self::Key, ::tesela::Error> { Ok(self.#key.clone()) }
+            fn encode(&self) -> Result<std::collections::BTreeMap<::tesela::__private::ApiName, ::tesela::__private::Value>, ::tesela::Error> { let mut values = std::collections::BTreeMap::new(); #(#encoders)* Ok(values) }
+            fn decode(mut record: ::tesela::__private::Record) -> Result<Self, ::tesela::Error> { #(#decoders)* Ok(Self { #(#initializers),* }) }
         }
-
-        impl #struct_name {
-            #(#field_descriptors)*
-            /// Return the Tesela `ObjectType` definition for this struct.
-            pub fn tesela_object_type() -> ::tesela::__private::ObjectType {
-                <Self as ::tesela::__private::ObjectTypeDefinition>::object_type()
-            }
-        }
+        impl #name { #(#accessors)* }
     })
 }
 
-fn named_fields(input: &DeriveInput) -> Result<Vec<&syn::Field>> {
-    match &input.data {
-        syn::Data::Struct(ds) => match &ds.fields {
-            syn::Fields::Named(named) => Ok(named.named.iter().collect()),
-            _ => Err(syn::Error::new(
-                Span::call_site(),
-                "ObjectType requires a struct with named fields",
-            )),
-        },
-        _ => Err(syn::Error::new(
-            Span::call_site(),
-            "ObjectType can only be applied to structs",
-        )),
-    }
-}
-
-fn parse_object_args(attrs: &[Attribute]) -> Result<ObjectTypeArgs> {
-    let mut args = ObjectTypeArgs::default();
-    for attr in tesela_attrs(attrs) {
+fn parse_args(input: &DeriveInput) -> syn::Result<Args> {
+    let mut args = Args::default();
+    for attr in tesela_attrs(&input.attrs) {
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("name") {
-                args.api_name = Some(meta.value()?.parse()?);
+            if meta.path.is_ident("key") {
+                args.key = Some(meta.value()?.parse()?);
                 return Ok(());
             }
-            if meta.path.is_ident("primary_key") {
-                args.primary_key = Some(meta.value()?.parse()?);
+            if meta.path.is_ident("name") {
+                args.name = Some(meta.value()?.parse()?);
                 return Ok(());
             }
             if meta.path.is_ident("display") {
@@ -148,22 +113,11 @@ fn parse_object_args(attrs: &[Attribute]) -> Result<ObjectTypeArgs> {
                 args.description = Some(meta.value()?.parse()?);
                 return Ok(());
             }
-            Err(unsupported_attr(&meta, "ObjectType"))
+            Err(unsupported_attr(&meta, "Object"))
         })?;
     }
     Ok(args)
 }
-
-fn api_name_tokens(value: Option<Expr>, fallback: &str) -> TokenStream2 {
-    match value {
-        Some(expr) => quote!(::tesela::__private::ApiNameSource::api_name(&(#expr))),
-        None => quote!(#fallback),
-    }
-}
-
-fn option_lit_tokens(value: Option<LitStr>) -> TokenStream2 {
-    match value {
-        Some(value) => quote!(Some(#value)),
-        None => quote!(None),
-    }
+fn option_string(value: Option<LitStr>) -> TokenStream2 {
+    value.map_or_else(|| quote!(None), |value| quote!(Some(#value.to_string())))
 }

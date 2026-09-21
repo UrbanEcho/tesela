@@ -131,64 +131,16 @@ pub enum LinkCardinality {
     ManyToMany,
 }
 
-/// Effect of a policy rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PolicyEffect {
-    /// Grant access.
-    Allow,
-    /// Deny access.
-    Deny,
-}
-
-/// Kind of action handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionHandlerKind {
-    /// Built-in CRUD handler.
-    Crud,
-    /// HTTP webhook handler.
-    Webhook,
-    /// FFI / user-provided callback handler.
-    Callback,
-    /// Multi-step composite handler.
-    Composite,
-}
-
-impl fmt::Display for ActionHandlerKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            ActionHandlerKind::Crud => "crud",
-            ActionHandlerKind::Webhook => "webhook",
-            ActionHandlerKind::Callback => "callback",
-            ActionHandlerKind::Composite => "composite",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl FromStr for ActionHandlerKind {
-    type Err = crate::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "crud" => Ok(Self::Crud),
-            "webhook" => Ok(Self::Webhook),
-            "callback" => Ok(Self::Callback),
-            "composite" => Ok(Self::Composite),
-            _ => Err(crate::Error::validation(format!(
-                "unknown action handler kind: {}",
-                s
-            ))),
-        }
-    }
-}
-
 /// Risk classification for actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Defaults to [`RiskLevel::Low`], so an action that declares nothing is not
+/// silently treated as dangerous; the *effects* of an action are what gate
+/// approval, and those default conservatively.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
     /// Low risk — routine operation.
+    #[default]
     Low,
     /// Medium risk — requires care.
     Medium,

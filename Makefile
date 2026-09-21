@@ -26,7 +26,11 @@ test: rust-test python-test ## Run Rust and Python tests.
 build: rust-build python-build ## Build Rust crates and the Python extension package.
 
 .PHONY: verify
-verify: rust-fmt-check rust-clippy rust-test rust-package python-test python-build docs-check ## Run the local pre-push gate.
+verify: source-size rust-fmt-check rust-clippy rust-test rust-bench-smoke rust-package python-test python-build docs-check ## Run the local pre-push gate.
+
+.PHONY: source-size
+source-size: ## Enforce the 500-line source-file limit.
+	$(PYTHON) scripts/check_source_size.py
 
 .PHONY: rust-build
 rust-build: ## Build all Rust crates.
@@ -56,18 +60,26 @@ rust-test: ## Run all Rust tests.
 rust-doc: ## Build Rust documentation.
 	cargo doc --workspace --no-deps
 
+.PHONY: rust-bench
+rust-bench: ## Run Criterion microbenchmarks.
+	cargo bench --workspace --exclude tesela-py --all-features
+
+.PHONY: rust-bench-smoke
+rust-bench-smoke: ## Compile and smoke-run benchmarks once.
+	cargo bench --workspace --exclude tesela-py --all-features -- --test
+
 .PHONY: rust-package
 rust-package: ## Build all public .crate archives without publishing.
-	cargo package --workspace --exclude tesela-python --allow-dirty --no-verify
+	cargo package --workspace --exclude tesela-py --allow-dirty --no-verify
 
 .PHONY: python-test
 python-test: ## Install the extension and run Python tests.
-	$(PYTHON) -m pip install -e sdk/python
-	$(PYTHON) -m pytest sdk/python/tests/ -q
+	$(PYTHON) -m pip install -e .
+	$(PYTHON) -m pytest python/tests/ -q
 
 .PHONY: python-build
 python-build: ## Build Python sdist/wheel.
-	$(PYTHON) -m build sdk/python
+	$(PYTHON) -m build
 
 .PHONY: docs-check
 docs-check: ## Verify local Markdown links and version consistency.
@@ -75,4 +87,4 @@ docs-check: ## Verify local Markdown links and version consistency.
 
 .PHONY: clean
 clean: ## Remove local build artifacts.
-	rm -rf dist target sdk/python/dist sdk/python/build sdk/python/*.egg-info
+	rm -rf dist target build *.egg-info

@@ -8,22 +8,22 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme.workspace = true
-description = "Ontology-driven library facade: declarative specs, store contracts, policy and native runtime."
+description = "Embedded semantic capability runtime with host-owned backends and policy."
 
 [dependencies]
 tesela-core = { workspace = true }
 tesela-ir = { workspace = true }
-tesela-store = { workspace = true }
+tesela-backend = { workspace = true }
 tesela-runtime = { workspace = true }
+tesela-capability = { workspace = true, optional = true }
 tesela-macros = { workspace = true, optional = true }
 serde_json = { workspace = true }
 
 [features]
-default = ["macros"]
+default = ["macros", "dev"]
 macros = ["dep:tesela-macros"]
+capability = ["dep:tesela-capability"]
+dev = ["tesela-backend/dev"]
 
 [dev-dependencies]
-chrono = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing-subscriber = { workspace = true }

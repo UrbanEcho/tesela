@@ -93,7 +93,7 @@ Tesela is currently **pre-1.0**.
 
 The execution model and internal architecture are under active development, and public APIs may change while the Rust and Python contracts are finalized.
 
-The repository currently builds releases from source. Registry installation instructions will be added when the first public release is published.
+The repository currently builds and validates releases from source.
 
 ## Quick start
 
@@ -102,57 +102,52 @@ The repository currently builds releases from source. Registry installation inst
 Define a domain object:
 
 ```python
-from tesela import Object, Field, field
+import tesela as ts
 
-class Customer(Object):
-    id: Field[str] = field(primary_key=True)
-    email: Field[str | None] = field(default=None)
+@ts.object(key="id")
+class Customer:
+    id: str
+    email: str | None = None
+    active: bool = True
 ```
 
 Bind it to an implementation and create a runtime:
 
 ```python
-from tesela import AllowAll, MemoryBackend, Runtime
-
-runtime = (
-    Runtime.builder()
-    .bind(Customer, MemoryBackend())
-    .policy(AllowAll())
-    .build()
+runtime = ts.Runtime(
+    {Customer: ts.MemoryBackend()},
+    policy=ts.policy.allow_all,
 )
+context = ts.context("example-service", request_id="request-1")
 ```
 
-Execution happens through a session representing one caller:
+Definitions and plans are immutable. Execution happens only at the runtime boundary:
 
 ```python
-session = runtime.session(principal="example-service")
-
-session.create(
-    Customer(
-        id="c-1",
-        email="a@example.com",
-    )
+runtime.run(
+    ts.create(Customer(id="c-1", email="a@example.com")),
+    context=context,
 )
 
-customer = session.get(Customer, "c-1")
+customer = runtime.run(ts.get(Customer, "c-1"), context=context)
 
-customers = (
-    session.query(Customer)
-    .where(Customer.email == "a@example.com")
+plan = (
+    ts.query(Customer)
+    .where(ts.col("active") & (ts.col("email") == "a@example.com"))
     .limit(10)
-    .all()
 )
+customers = runtime.run(plan, context=context)
 ```
 
-The model is semantic. `MemoryBackend` is only a local-development implementation; production applications bind the same `Customer` definition to their own repositories or services.
+Model attributes remain ordinary Python values; expressions begin explicitly with `ts.col(...)` or `ts.lit(...)`. `MemoryBackend` is only a development implementation; production applications bind the same definition to typed repository callbacks or native pushdown integrations.
 
 ### Rust
 
 ```rust
 use tesela::prelude::*;
 
-#[derive(ObjectType)]
-#[tesela(primary_key = "id")]
+#[derive(Debug, Clone, PartialEq, Object)]
+#[tesela(key = id)]
 struct Customer {
     id: String,
     email: Option<String>,
@@ -160,26 +155,25 @@ struct Customer {
 
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder()
-        .bind::<Customer>(MemoryBackend::new())
-        .policy(AllowAll)
+        .object::<Customer>(MemoryBackend::new())
+        .policy(tesela::policy::allow_all)
         .build()?;
 
-    let session = runtime.session(
-        Context::service("example-service")?
-    );
+    let context = Context::builder("example-service")
+        .request_id("request-1")
+        .build()?;
 
-    session.create(Customer {
+    runtime.run(create(Customer {
         id: "c-1".into(),
         email: Some("a@example.com".into()),
-    })?;
+    }), &context)?;
 
-    let customer = session.get::<Customer>("c-1")?;
+    let customer = runtime.run(get::<Customer>("c-1".into()), &context)?;
 
-    let customers = session
-        .query::<Customer>()
+    let plan = query::<Customer>()
         .filter(Customer::email().eq("a@example.com"))
-        .limit(10)
-        .all()?;
+        .limit(10);
+    let customers = runtime.run(plan, &context)?;
 
     Ok(())
 }
@@ -194,7 +188,7 @@ Tesela separates four concerns that are often mixed together.
 | What exists? | Object types, links, actions | `Customer`, `CustomerOrders` |
 | Where does it come from? | Backend bindings | Postgres repository, HTTP service |
 | Who may use it? | Policy + authority | tenant, role, delegated scope |
-| Who is calling now? | Session / execution context | request, service, agent |
+| Who is calling now? | Execution context | request, service, agent |
 
 This separation is fundamental.
 
@@ -209,8 +203,8 @@ An action declaration describes semantics and effects; the host binds the execut
 Objects define semantic entities.
 
 ```rust
-#[derive(ObjectType)]
-#[tesela(primary_key = "id")]
+#[derive(Object)]
+#[tesela(key = id)]
 struct Customer {
     id: String,
     email: Option<String>,
@@ -229,15 +223,10 @@ The same object may therefore be backed by a database repository, remote service
 Queries are compiled against the semantic model before reaching a backend.
 
 ```rust
-let customers = session
-    .query::<Customer>()
-    .filter(
-        Customer::active()
-            .eq(true)
-            .and(Customer::email().is_not_null())
-    )
-    .limit(100)
-    .all()?;
+let plan = query::<Customer>()
+    .filter(Customer::active().predicate() & Customer::email().is_not_null())
+    .limit(100);
+let customers = runtime.run(plan, &context)?;
 ```
 
 Unknown fields and invalid operations fail before execution rather than silently reaching a backend.
@@ -283,7 +272,7 @@ The declaration and implementation remain separate.
 
 That means the same semantic action can participate in policy decisions and capability discovery without embedding application infrastructure into the ontology.
 
-## Runtime and sessions
+## Runtime and contexts
 
 A `Runtime` represents compiled application semantics:
 
@@ -296,10 +285,10 @@ Runtime
 └── policy
 ```
 
-A `Session` represents one execution authority:
+A `Context` represents one explicit execution authority:
 
 ```text
-Session
+Context
 ├── principal
 ├── delegated authority
 ├── request identity
@@ -308,7 +297,9 @@ Session
 └── execution budget
 ```
 
-This makes request-specific state explicit without requiring applications to rebuild the semantic runtime for every call.
+The context is immutable and supplied to every execution. Tesela never invents a default principal or request identity. This keeps request-specific state explicit without requiring applications to rebuild the runtime for every call.
+
+`Runtime.run(plan, context)` returns the useful typed value. `Runtime.execute(plan, context)` returns that value together with its receipt and optional revision. Revisions never become hidden model attributes.
 
 ## Policy and authority
 

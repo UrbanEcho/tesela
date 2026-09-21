@@ -1,15 +1,19 @@
-# Python bindings
+# Python facade
 
-The Python package is a curated facade over `tesela._native`. Native storage, compilation, authority checks, policy enforcement, and execution remain in Rust. Python owns declaration ergonomics, typed model materialization, query expressions, and callback adaptation.
+The Python API is a typed facade over the Rust engine. Its public model has three parts:
 
-The layout deliberately separates responsibilities:
+- immutable definitions: `@tesela.object`, links, and `@tesela.action` commands;
+- immutable expressions and plans: `col`, `query`, `get`, mutations, traversal, aggregation, and batch;
+- `Runtime`, the only execution boundary.
 
-- `crates/tesela-py` is the mechanical PyO3 boundary;
-- `python/tesela/__init__.py` is the small public Python vocabulary;
-- `python/tesela/model.py` and `runtime.py` own declarations and execution ergonomics;
-- checked-in `.pyi` files and `py.typed` define the verified typing contract;
-- `python/tests` verifies import shape, typed values, callbacks, and packaging.
+Every call to `run` or `execute` requires an explicit immutable `Context`. `run` returns the useful value; `execute` additionally returns the receipt and optional revision. Runtime construction discovers semantic definitions from typed binding maps and does not use a registry or public `Spec`.
 
-The package is a native language binding, not a second client-layer architecture, and it has no JSON-string ABI. `Spec.to_json()` exists only for explicit interchange.
+Application typing is defined by the inline Python source. The only stub is [`_native.pyi`](tesela/_native.pyi), because the extension is compiled. [`consumer.py`](typecheck/consumer.py) is a strict consumer fixture checked by Pyright.
 
-Build and verify with `maturin develop`, `pytest python/tests -q`, `pyright`, and `PYTHONPATH=python pyright --verifytypes tesela --ignoreexternal` from the repository root.
+Run:
+
+```text
+uv run --group dev pytest python/tests -q
+uv run --group dev pyright
+uv build
+```

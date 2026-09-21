@@ -19,3 +19,4 @@ darling = "0.20"
 [dev-dependencies]
 tesela-core = { workspace = true }
 tesela-ir = { workspace = true }
+serde_json = { workspace = true }

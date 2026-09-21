@@ -197,7 +197,7 @@ fn observer_panic_cannot_fail_a_committed_mutation() -> Result<(), Error> {
     assert!(result.output.record.is_some());
     assert!(
         backend
-            .get(&name("customer"), &Key::string("one"))?
+            .get(&context(), &name("customer"), &Key::string("one"))?
             .is_some()
     );
     Ok(())

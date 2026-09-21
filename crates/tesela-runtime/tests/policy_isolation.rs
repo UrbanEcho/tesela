@@ -62,6 +62,7 @@ fn fixture() -> Result<(Arc<Runtime>, ExecutionContext), Error> {
         deprecated_at: None,
     });
     let backend = MemoryBackend::new();
+    let seed_context = ExecutionContext::trusted(Principal::new("seed"), "seed")?;
     for (id, tenant) in [("a", "acme"), ("g", "globex")] {
         let values: BTreeMap<_, _> = [
             (name("id"), Value::string(id)),
@@ -69,7 +70,7 @@ fn fixture() -> Result<(Arc<Runtime>, ExecutionContext), Error> {
             (name("email"), Value::string(format!("{id}@test"))),
         ]
         .into();
-        backend.create(&name("customer"), Key::string(id), values)?;
+        backend.create(&seed_context, &name("customer"), Key::string(id), values)?;
     }
     let mut bindings = BindingsBuilder::new();
     bindings.bind_object(name("customer"), backend);
@@ -219,6 +220,7 @@ fn traversal_enforces_source_and_target_row_scopes() -> Result<(), Error> {
     });
     let backend = MemoryBackend::new();
     backend.bind_link(name("orders"), name("customer_id"));
+    let seed_context = ExecutionContext::trusted(Principal::new("seed"), "seed")?;
     for (object, id, tenant, customer) in [
         ("customer", "a", "acme", "a"),
         ("customer", "g", "globex", "g"),
@@ -226,6 +228,7 @@ fn traversal_enforces_source_and_target_row_scopes() -> Result<(), Error> {
         ("order", "og", "globex", "a"),
     ] {
         backend.create(
+            &seed_context,
             &name(object),
             Key::string(id),
             [

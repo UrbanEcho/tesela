@@ -53,6 +53,7 @@ pub(super) fn check_query(object: &CompiledObjectType, query: &Query) -> Result<
 }
 
 pub(super) fn apply_mutation(
+    context: &ExecutionContext,
     ontology: &CompiledOntology,
     backend: &dyn Backend,
     object: &CompiledObjectType,
@@ -63,7 +64,7 @@ pub(super) fn apply_mutation(
             object.apply_defaults(&mut values);
             ontology.validate_create(object, &values)?;
             let key = primary_key(object, &values)?;
-            backend.create(object.api_name(), key, values)
+            backend.create(context, object.api_name(), key, values)
         }
         Mutation::Update {
             primary_key,
@@ -73,6 +74,7 @@ pub(super) fn apply_mutation(
         } => {
             ontology.validate_patch(object, &values)?;
             backend.update(
+                context,
                 object.api_name(),
                 &primary_key,
                 values,
@@ -83,7 +85,12 @@ pub(super) fn apply_mutation(
             primary_key,
             expected_revision,
             ..
-        } => backend.delete(object.api_name(), &primary_key, expected_revision.as_ref()),
+        } => backend.delete(
+            context,
+            object.api_name(),
+            &primary_key,
+            expected_revision.as_ref(),
+        ),
         Mutation::Upsert {
             mut values,
             expected_revision,
@@ -92,12 +99,50 @@ pub(super) fn apply_mutation(
             object.apply_defaults(&mut values);
             ontology.validate_create(object, &values)?;
             let key = primary_key(object, &values)?;
-            backend.upsert(object.api_name(), key, values, expected_revision.as_ref())
+            backend.upsert(
+                context,
+                object.api_name(),
+                key,
+                values,
+                expected_revision.as_ref(),
+            )
         }
+        Mutation::Batch { items } => backend.batch(
+            context,
+            object.api_name(),
+            object.primary_key().api_name(),
+            &items,
+        ),
+    }
+}
+
+pub(super) fn validate_mutation(
+    ontology: &CompiledOntology,
+    object: &CompiledObjectType,
+    mutation: &Mutation,
+) -> Result<(), Error> {
+    match mutation {
+        Mutation::Create { values } | Mutation::Upsert { values, .. } => {
+            let mut values = values.clone();
+            object.apply_defaults(&mut values);
+            ontology.validate_create(object, &values)?;
+            primary_key(object, &values)?;
+        }
+        Mutation::Update { values, .. } => ontology.validate_patch(object, values)?,
+        Mutation::Delete { .. } => {}
         Mutation::Batch { items } => {
-            backend.batch(object.api_name(), object.primary_key().api_name(), &items)
+            if items.is_empty() {
+                return Err(Error::bad_request("batch requires at least one mutation"));
+            }
+            for item in items {
+                if matches!(item, Mutation::Batch { .. }) {
+                    return Err(Error::bad_request("nested batches are not supported"));
+                }
+                validate_mutation(ontology, object, item)?;
+            }
         }
     }
+    Ok(())
 }
 
 pub(super) fn primary_key(

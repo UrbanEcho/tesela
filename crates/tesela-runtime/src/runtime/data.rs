@@ -27,7 +27,7 @@ impl Runtime {
         check_query(object_type, &query)?;
         let backend = object_backend(&snapshot, object_type)?;
         context.charge_backend_call()?;
-        let mut page = backend.search(object, &query)?;
+        let mut page = backend.search(context, object, &query)?;
         redact(&mut page.records, &decision.redactions);
         context.charge_rows(page.records.len() as u64)?;
         context.charge_bytes(records_bytes(&page.records))?;
@@ -45,13 +45,13 @@ impl Runtime {
         ))
     }
 
-    /// Fetch one record while enforcing row policy.
-    pub fn get(
+    /// Look up one record while enforcing row policy.
+    pub fn lookup(
         &self,
         context: &ExecutionContext,
         object: &ApiName,
         key: &Key,
-    ) -> Result<Execution<Record>, Error> {
+    ) -> Result<Execution<Option<Record>>, Error> {
         let started = Instant::now();
         let snapshot = self.snapshot.load_full();
         let object_type = object_type(&snapshot, object)?;
@@ -76,14 +76,19 @@ impl Runtime {
                 ..Query::default()
             };
             check_query(object_type, &query)?;
-            backend.search(object, &query)?.records.into_iter().next()
+            backend
+                .search(context, object, &query)?
+                .records
+                .into_iter()
+                .next()
         } else {
-            backend.get(object, key)?
+            backend.get(context, object, key)?
+        };
+        if let Some(record) = record.as_mut() {
+            redact(std::slice::from_mut(record), &decision.redactions);
+            context.charge_rows(1)?;
+            context.charge_bytes(records_bytes(std::slice::from_ref(record)))?;
         }
-        .ok_or_else(|| Error::not_found("record", key))?;
-        redact(std::slice::from_mut(&mut record), &decision.redactions);
-        context.charge_rows(1)?;
-        context.charge_bytes(records_bytes(std::slice::from_ref(&record)))?;
         Ok(self.finish(
             context,
             &snapshot,
@@ -96,6 +101,22 @@ impl Runtime {
             record,
             started,
         ))
+    }
+
+    /// Fetch one record, returning a structured not-found error when absent.
+    pub fn get(
+        &self,
+        context: &ExecutionContext,
+        object: &ApiName,
+        key: &Key,
+    ) -> Result<Execution<Record>, Error> {
+        let execution = self.lookup(context, object, key)?;
+        Ok(Execution {
+            output: execution
+                .output
+                .ok_or_else(|| Error::not_found("record", key))?,
+            receipt: execution.receipt,
+        })
     }
 
     /// Execute an atomic backend mutation.
@@ -128,8 +149,22 @@ impl Runtime {
         if let Some(input) = mutation_input(&mutation) {
             context.charge_bytes(value_bytes(&input))?;
         }
+        validate_mutation(&snapshot.ontology, object_type, &mutation)?;
+        let capabilities = backend.capabilities();
+        if matches!(mutation, Mutation::Upsert { .. }) && !capabilities.upsert {
+            return Err(Error::unsupported("backend does not provide atomic upsert"));
+        }
+        if matches!(mutation, Mutation::Batch { .. }) && !capabilities.batch {
+            return Err(Error::unsupported("backend does not provide atomic batch"));
+        }
         context.charge_backend_call()?;
-        let result = apply_mutation(&snapshot.ontology, backend.as_ref(), object_type, mutation)?;
+        let result = apply_mutation(
+            context,
+            &snapshot.ontology,
+            backend.as_ref(),
+            object_type,
+            mutation,
+        )?;
         let approval_required = decision.require_approval;
         Ok(self.finish(
             context,
@@ -205,7 +240,7 @@ fn prepare_mutation(
     let load = |key: &Key| -> Result<Record, Error> {
         context.charge_backend_call()?;
         backend
-            .get(object.api_name(), key)?
+            .get(context, object.api_name(), key)?
             .ok_or_else(|| Error::not_found("record", key))
     };
 

@@ -79,6 +79,12 @@ impl Filter {
         }
     }
 
+    /// Create a suffix predicate.
+    #[must_use]
+    pub fn ends_with(field: ApiName, value: impl Into<Value>) -> Self {
+        Self::scalar(FilterOp::EndsWith, field, value.into())
+    }
+
     /// Create an AND filter combining sub-filters.
     #[must_use]
     pub fn and(filters: Vec<Filter>) -> Self {

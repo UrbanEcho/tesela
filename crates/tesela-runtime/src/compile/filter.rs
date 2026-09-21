@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tesela_core::like::LikePlan;
-use tesela_core::{ApiName, Error, FilterOp, Key, Value};
+use tesela_core::{ApiName, DataType, Error, FilterOp, Key, Value};
 use tesela_ir::Filter;
 
 use super::CompiledObjectType;
@@ -98,6 +98,8 @@ pub enum CompiledFilter {
     Contains(FieldRef, Arc<str>),
     /// Prefix match.
     StartsWith(FieldRef, Arc<str>),
+    /// Suffix match.
+    EndsWith(FieldRef, Arc<str>),
     /// SQL `LIKE`.
     Like(FieldRef, Arc<LikePlan>),
 }
@@ -134,6 +136,10 @@ impl CompiledFilter {
                 .value_of(values)
                 .and_then(Value::as_str)
                 .is_some_and(|item| item.starts_with(expected.as_ref())),
+            Self::EndsWith(field, expected) => field
+                .value_of(values)
+                .and_then(Value::as_str)
+                .is_some_and(|item| item.ends_with(expected.as_ref())),
             Self::Like(field, plan) => field
                 .value_of(values)
                 .and_then(Value::as_str)
@@ -175,6 +181,7 @@ impl CompiledFilter {
             | Self::Between(field, _, _)
             | Self::Contains(field, _)
             | Self::StartsWith(field, _)
+            | Self::EndsWith(field, _)
             | Self::Like(field, _) => single(field, found),
         }
     }
@@ -233,11 +240,48 @@ pub fn compile_filter(
             let property = object_type
                 .property(name)
                 .ok_or_else(|| Error::unknown_property(object_type, name))?;
+            validate_operator(property.data_type(), scalar)?;
+            for value in filter.value.iter().chain(&filter.values) {
+                if !value.is_null() && !property.accepts_type(value) {
+                    return Err(Error::validation(format!(
+                        "{} filter value does not match {}.{}",
+                        logical_name(scalar),
+                        object_type.api_name(),
+                        name
+                    )));
+                }
+            }
             let field = FieldRef::new(property.id(), name.clone());
             let operand = Operation::of(filter, field)?;
             Ok(operand.compile(scalar))
         }
     }
+}
+
+fn validate_operator(data_type: DataType, op: FilterOp) -> Result<(), Error> {
+    if matches!(
+        op,
+        FilterOp::Contains | FilterOp::StartsWith | FilterOp::EndsWith | FilterOp::Like
+    ) && data_type != DataType::String
+    {
+        return Err(Error::validation(format!(
+            "{} requires a string property",
+            logical_name(op)
+        )));
+    }
+    if matches!(
+        op,
+        FilterOp::Lt | FilterOp::Lte | FilterOp::Gt | FilterOp::Gte | FilterOp::Between
+    ) && matches!(
+        data_type,
+        DataType::Json | DataType::Geometry | DataType::Array | DataType::Vector(_)
+    ) {
+        return Err(Error::validation(format!(
+            "{} is not supported for {data_type:?}",
+            logical_name(op)
+        )));
+    }
+    Ok(())
 }
 
 /// The name a filter operator is shown under in diagnostics.
@@ -259,6 +303,7 @@ fn logical_name(op: FilterOp) -> &'static str {
         FilterOp::Between => "between",
         FilterOp::Contains => "contains",
         FilterOp::StartsWith => "starts_with",
+        FilterOp::EndsWith => "ends_with",
         FilterOp::Like => "like",
     }
 }
@@ -324,7 +369,7 @@ impl Operation {
                     scalar_key(high, filter.op)?,
                 ))
             }
-            FilterOp::Contains | FilterOp::StartsWith => {
+            FilterOp::Contains | FilterOp::StartsWith | FilterOp::EndsWith => {
                 let text = text_operand(filter)?;
                 Ok(Self::Text(field, text))
             }
@@ -365,6 +410,7 @@ impl Operation {
             Self::Pair(field, low, high) => CompiledFilter::Between(field, low, high),
             Self::Text(field, text) => match op {
                 FilterOp::StartsWith => CompiledFilter::StartsWith(field, text),
+                FilterOp::EndsWith => CompiledFilter::EndsWith(field, text),
                 _ => CompiledFilter::Contains(field, text),
             },
             Self::Pattern(field, plan) => CompiledFilter::Like(field, plan),
@@ -389,7 +435,7 @@ fn scalar_key(value: &Value, op: FilterOp) -> Result<Key, Error> {
     Ok(key)
 }
 
-/// Read the string operand of `LIKE`, `CONTAINS` or `STARTS WITH`.
+/// Read the string operand of `LIKE`, `CONTAINS`, `STARTS WITH` or `ENDS WITH`.
 fn text_operand(filter: &Filter) -> Result<Arc<str>, Error> {
     filter
         .value

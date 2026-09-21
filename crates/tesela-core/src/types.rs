@@ -75,6 +75,8 @@ pub enum FilterOp {
     Contains,
     /// Prefix match.
     StartsWith,
+    /// Suffix match.
+    EndsWith,
     /// Logical AND of sub-filters.
     And,
     /// Logical OR of sub-filters.

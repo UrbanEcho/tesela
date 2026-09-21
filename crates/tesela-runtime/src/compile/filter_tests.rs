@@ -105,7 +105,7 @@ fn between_requires_two_values() {
         op: FilterOp::Between,
         field: Some(ApiName::from("name")),
         value: None,
-        values: vec![Value::integer(1)],
+        values: vec![Value::string("a")],
         args: Vec::new(),
     };
     assert!(compile(&one).is_err());
@@ -113,7 +113,7 @@ fn between_requires_two_values() {
         op: FilterOp::Between,
         field: Some(ApiName::from("name")),
         value: None,
-        values: vec![Value::integer(1), Value::integer(2)],
+        values: vec![Value::string("a"), Value::string("z")],
         args: Vec::new(),
     };
     assert!(compile(&two).is_ok());
@@ -148,6 +148,17 @@ fn like_requires_a_string_and_compiles_its_pattern() {
         args: Vec::new(),
     };
     assert!(compile(&not_a_string).is_err());
+}
+
+#[test]
+fn suffix_matching_is_typed_and_allocation_free_at_evaluation() {
+    let filter = Filter::ends_with(ApiName::from("name"), "example.test");
+    let compiled = compile(&filter).expect("string suffix compiles");
+    let CompiledFilter::EndsWith(_, suffix) = compiled else {
+        panic!("expected an EndsWith filter");
+    };
+    assert_eq!(&*suffix, "example.test");
+    assert!(compile(&Filter::ends_with(ApiName::from("revenue"), "x")).is_err());
 }
 
 #[test]

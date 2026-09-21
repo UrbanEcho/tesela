@@ -1,59 +1,58 @@
-use tesela::{LinkType, ObjectType, TraitDef, action, policy};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-#[derive(ObjectType)]
-#[tesela(datasource = "memory", primary_key = "id")]
-struct Customer {
-    id: String,
-    email: Option<String>,
+use tesela::backend::{Backend, BackendBuilder, BindingsBuilder};
+use tesela::dev::MemoryBackend;
+use tesela::model::{ApiName, DataType, ObjectType, Property, Spec, Value};
+use tesela::policy::{AllowAllPolicy, ExecutionContext, Principal};
+use tesela::query::Mutation;
+use tesela::runtime::Runtime;
+
+fn name(value: &'static str) -> ApiName {
+    ApiName::from(value)
 }
-
-#[derive(LinkType)]
-#[tesela(from = "customer", to = "customer")]
-struct Referral;
-
-#[derive(TraitDef)]
-struct Contact {
-    email: String,
+fn spec() -> Spec {
+    let mut spec = Spec::default();
+    spec.upsert_object_type(ObjectType {
+        api_name: name("customer"),
+        display: None,
+        description: None,
+        primary_key: name("id"),
+        properties: vec![Property {
+            api_name: name("id"),
+            display: None,
+            description: None,
+            data_type: DataType::String,
+            nullable: None,
+            default: None,
+            allowed_values: None,
+            tags: Vec::new(),
+        }],
+        traits: Vec::new(),
+        tags: Vec::new(),
+        deprecated_at: None,
+    });
+    spec
 }
-
-#[action(subject = "customer")]
-fn welcome(email: String) -> String {
-    email
-}
-
-#[policy(roles = "admin", operations = "execute")]
-fn can_welcome() {}
 
 #[test]
-fn macros_work_with_facade_only() {
-    let customer = Customer {
-        id: "1".into(),
-        email: None,
-    };
-    let contact = Contact {
-        email: "a@example.com".into(),
-    };
-    assert_eq!(customer.id, "1");
-    assert!(customer.email.is_none());
-    assert_eq!(contact.email, "a@example.com");
-    let object = Customer::tesela_object_type();
-    assert_eq!(object.properties.len(), 2);
-    assert_eq!(object.source.resource.as_deref(), Some("customer"));
-    assert_eq!(object.properties[1].nullable, Some(true));
-    let link = Referral::tesela_link_type();
-    assert_eq!(link.from.as_ref(), "customer");
-    assert_eq!(link.display.as_deref(), Some("Referral"));
-    let trait_ = Contact::tesela_trait();
-    assert_eq!(trait_.properties.len(), 1);
-    assert_eq!(trait_.display.as_deref(), Some("Contact"));
-    let action = WelcomeAction::tesela_action_type();
-    assert_eq!(action.risk_level.as_deref(), Some("low"));
-    assert_eq!(
-        action.input_schema.unwrap().0["properties"]["email"]["type"],
-        "string"
-    );
-    assert_eq!(action.subject.unwrap().as_ref(), "customer");
-    assert_eq!(CanWelcomePolicy::tesela_policy_rule().roles, vec!["admin"]);
-    assert_eq!(welcome("ok".to_string()), "ok");
-    can_welcome();
+fn curated_facade_builds_and_runs() -> Result<(), tesela::error::Error> {
+    let backend = MemoryBackend::new();
+    let mut bindings = BindingsBuilder::new();
+    bindings.bind_object(name("customer"), backend);
+    let runtime = Runtime::builder(spec(), bindings.build(), Arc::new(AllowAllPolicy)).build()?;
+    let context = ExecutionContext::trusted(Principal::new("test"), "facade")?;
+    let values: BTreeMap<_, _> = [(name("id"), Value::string("one"))].into();
+    runtime.mutate(&context, &name("customer"), Mutation::Create { values })?;
+    assert_eq!(runtime.spec().object_types.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn closure_backend_derives_capabilities() {
+    let backend = BackendBuilder::new("repository")
+        .get(|_, _| Ok(None))
+        .build();
+    assert!(backend.capabilities().get);
+    assert!(!backend.capabilities().search);
 }

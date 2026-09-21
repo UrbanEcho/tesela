@@ -1,91 +1,98 @@
+//! End-to-end throughput harness.
+//!
+//! Run through [`benchmarks/baseline.py`](../../../../benchmarks/baseline.py),
+//! which records the numbers this prints. It measures the paths a host actually
+//! calls — spec parse and serialize, search, get, upsert — so a change to any
+//! of them shows up here rather than in a microbenchmark nobody reads.
+
 use std::collections::BTreeMap;
 use std::hint::black_box;
-use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tesela::{
-    Actor, AllowAllPolicy, ApiName, DataType, Datasource, Error, MemoryStore, Mutation,
-    ObjectTypeDefinition, Query, Runtime, RuntimeOptions, Spec, StaticStoreRouter, Value,
-};
+use tesela::backend::BindingsBuilder;
+use tesela::dev::MemoryBackend;
+use tesela::model::{ApiName, DataType, Key, Spec, Value};
+use tesela::policy::{AllowAllPolicy, ExecutionContext, Principal};
+use tesela::prelude::{Error, Mutation, Query, Runtime};
 
 #[derive(tesela::ObjectType)]
-#[tesela(datasource = "memory", primary_key = "id")]
+#[tesela(primary_key = "id")]
 struct Customer {
     id: String,
     score: i64,
 }
 
+const ROWS: i64 = 100;
+
 fn measure<T, F>(name: &str, count: usize, mut work: F) -> Result<(), Error>
 where
     F: FnMut() -> Result<T, Error>,
 {
+    // One warm-up pass, so the first allocation does not land in the sample.
+    black_box(work()?);
     let start = Instant::now();
     for _ in 0..count {
         black_box(work()?);
     }
+    let elapsed: Duration = start.elapsed();
     println!(
         "{name}: {:.3} us/op ({count} ops)",
-        start.elapsed().as_secs_f64() * 1_000_000.0 / count as f64
+        elapsed.as_secs_f64() * 1_000_000.0 / count as f64
     );
     Ok(())
 }
 
 fn main() -> Result<(), Error> {
-    let row = Customer {
-        id: "0".into(),
-        score: 0,
-    };
-    black_box((&row.id, row.score, DataType::String));
     let mut spec = Spec::default();
-    spec.datasources.push(Datasource {
-        api_name: ApiName::new("memory")?,
-        adapter_type: "memory".into(),
-        config: None,
-        secrets: None,
-    });
-    spec.object_types.push(Customer::object_type());
-    let json = spec.to_json_string()?;
-    let store = MemoryStore::new();
-    store.set_spec(spec.clone())?;
-    let router = Arc::new(StaticStoreRouter::new());
-    router.register(ApiName::new("memory")?, store)?;
-    let runtime = Runtime::new(
+    spec.upsert_object_type(Customer::tesela_object_type());
+
+    let customer = Customer::tesela_object_type().api_name;
+    let backend = MemoryBackend::new();
+    let mut bindings = BindingsBuilder::new();
+    bindings.bind_object(customer.clone(), backend.clone());
+    let runtime = Runtime::builder(
         spec.clone(),
-        RuntimeOptions {
-            store_router: Some(router),
-            policy_engine: Some(Arc::new(AllowAllPolicy)),
-            ..RuntimeOptions::default()
-        },
-    )?;
-    let actor = Actor {
-        user_id: "bench".into(),
-        roles: vec![],
-        claims: BTreeMap::new(),
-    };
-    let object = ApiName::new("customer")?;
-    for id in 0..100 {
+        bindings.build(),
+        std::sync::Arc::new(AllowAllPolicy),
+    )
+    .build()?;
+    let context = ExecutionContext::trusted(Principal::new("bench"), "benchmark")?;
+
+    for id in 0..ROWS {
         let mut values = BTreeMap::new();
         values.insert(ApiName::new("id")?, Value::string(id.to_string()));
         values.insert(ApiName::new("score")?, Value::integer(id));
-        runtime.mutate(&actor, &object, Mutation::Create { values })?;
+        runtime.mutate(&context, &customer, Mutation::Create { values })?;
     }
+
+    let json = spec.to_json_string()?;
     let mut update = BTreeMap::new();
     update.insert(ApiName::new("id")?, Value::string("0"));
     update.insert(ApiName::new("score")?, Value::integer(1));
+
+    let row = Customer {
+        id: "0".to_string(),
+        score: 0,
+    };
+    black_box((row.id.as_str(), row.score, DataType::String));
+    black_box(backend.len(&customer)?);
+
     measure("spec.parse", 10_000, || Spec::parse(json.as_bytes()))?;
     measure("spec.serialize", 10_000, || spec.to_json_string())?;
-    measure("search.100", 10_000, || {
-        runtime.search(&actor, &object, Query::default())
+    measure("search.all", 10_000, || {
+        runtime.search(&context, &customer, Query::default())
     })?;
     measure("get", 10_000, || {
-        runtime.get(&actor, &object, &Value::string("0"))
+        runtime.get(&context, &customer, &Key::string("0"))
     })?;
     measure("mutate.upsert", 10_000, || {
         runtime.mutate(
-            &actor,
-            &object,
+            &context,
+            &customer,
             Mutation::Upsert {
                 values: update.clone(),
+                expected_revision: None,
+                preconditions: Vec::new(),
             },
         )
     })?;

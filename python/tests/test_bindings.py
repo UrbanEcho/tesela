@@ -76,7 +76,7 @@ def test_crud_returns_typed_values_and_optional_get() -> None:
 
 def test_execution_requires_explicit_context() -> None:
     with pytest.raises(TypeError):
-        ts.context("test-agent")
+        ts.context("test-agent")  # type: ignore[reportCallIssue]
     with pytest.raises(ValueError, match="request_id"):
         ts.context("test-agent", request_id="")
     with pytest.raises(TypeError, match="explicit"):
@@ -180,10 +180,10 @@ def test_native_and_residual_aggregation_are_equivalent() -> None:
     rows = [Customer("a", score=1), Customer("b", score=2)]
 
     class NativeCustomers(ts.backend.Native[Customer]):
-        def search(self, _context: ts.Context, _query):
+        def search(self, context: ts.Context, query):
             return rows
 
-        def aggregate(self, _context: ts.Context, _query):
+        def aggregate(self, context: ts.Context, query):
             return {"groups": [{"total": 2}]}
 
     plan = ts.query(Customer).group_by().agg(total=ts.count())

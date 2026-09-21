@@ -1,0 +1,19 @@
+[package]
+name = "tesela-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Mechanical Python bindings for Tesela"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tesela = { workspace = true, features = ["dev"] }
+pyo3 = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }

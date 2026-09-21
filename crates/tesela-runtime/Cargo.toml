@@ -5,17 +5,16 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Ontology runtime with store routing, policy, actions and optional audit/event ports."
+description = "Compiled semantic execution, policy, authority, and capability runtime."
 
 [dependencies]
 tesela-core = { workspace = true }
 tesela-ir = { workspace = true }
-tesela-store = { workspace = true }
+tesela-backend = { workspace = true }
+tesela-capability = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-tracing = { workspace = true }
+arc-swap = { workspace = true }
 
 [dev-dependencies]
+tesela-backend = { workspace = true, features = ["dev"] }

@@ -3,20 +3,17 @@
 
 //! Ontology runtime for Tesela.
 //!
-//! The runtime knows about ontology metadata, policy, and store routing. It
+//! The runtime knows about ontology metadata, policy, and backend routing. It
 //! does not own transports, cloud adapters, agents, workflows, or schedulers.
 
+pub use tesela_capability as capability;
+pub mod compile;
 mod policy;
 mod runtime;
 #[cfg(test)]
 mod runtime_tests;
-mod tools;
 
 pub use policy::AllowAllPolicy;
-pub use runtime::{OntologyHandle, Runtime, RuntimeOptions};
-pub use tools::{
-    ActionDescribeArgs, AggregateArgs, AggregateFunctionInput, AggregateInput, EmptyArgs, GetArgs,
-    ObjectSetComposeArgs, ObjectSetComposeOp, ObjectSetResolveArgs, OntologyTool,
-    OntologyToolDefinition, SearchArgs, ToolApprovalPolicy, ToolSideEffect, TraverseArgs,
-    ontology_tool_definitions,
+pub use runtime::{
+    AccessExplanation, Execution, ExecutionPlan, ExecutionReceipt, Runtime, RuntimeBuilder,
 };

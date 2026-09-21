@@ -2,7 +2,8 @@
 ##
 ## Tesela Rust and native Python development targets.
 
-PYTHON ?= python
+UV ?= uv
+PYTHON ?= $(UV) run python
 
 .DEFAULT_GOAL := help
 
@@ -26,7 +27,7 @@ test: rust-test python-test ## Run Rust and Python tests.
 build: rust-build python-build ## Build Rust crates and the Python extension package.
 
 .PHONY: verify
-verify: source-size rust-fmt-check rust-clippy rust-test rust-bench-smoke rust-package python-test python-build docs-check ## Run the local pre-push gate.
+verify: source-size rust-fmt-check rust-clippy rust-test rust-bench-smoke rust-package python-test python-typecheck python-build docs-check ## Run the local pre-push gate.
 
 .PHONY: source-size
 source-size: ## Enforce the 500-line source-file limit.
@@ -74,12 +75,16 @@ rust-package: ## Build all public .crate archives without publishing.
 
 .PHONY: python-test
 python-test: ## Install the extension and run Python tests.
-	$(PYTHON) -m pip install -e .
-	$(PYTHON) -m pytest python/tests/ -q
+	$(UV) run --group dev pytest python/tests/ -q
+
+.PHONY: python-typecheck
+python-typecheck: ## Type-check public Python usage and package exports.
+	$(UV) run --group dev pyright
+	$(UV) run --group dev pyright --verifytypes tesela --ignoreexternal
 
 .PHONY: python-build
 python-build: ## Build Python sdist/wheel.
-	$(PYTHON) -m build
+	$(UV) build
 
 .PHONY: docs-check
 docs-check: ## Verify local Markdown links and version consistency.

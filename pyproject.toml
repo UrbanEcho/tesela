@@ -10,13 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Miguel Cárdenas" }]
+dependencies = ["typing-extensions>=4.1"]
 
 [dependency-groups]
 dev = ["pyright>=1.1.405", "pytest>=8"]
 
 [tool.pyright]
-include = ["python/tesela"]
-typeCheckingMode = "strict"
+include = ["python/tesela", "python/typecheck"]
+typeCheckingMode = "standard"
 
 [tool.maturin]
 manifest-path = "crates/tesela-py/Cargo.toml"

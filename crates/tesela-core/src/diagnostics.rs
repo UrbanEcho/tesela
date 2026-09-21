@@ -15,23 +15,29 @@ pub enum DiagnosticLevel {
 }
 
 /// Structured diagnostic code for categorization.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
-    /// Invalid name format or duplicate name.
+    /// A name is malformed.
     InvalidName,
-    /// Broken reference (missing datasource, unknown object type, etc.).
+    /// Two entities share an API name.
+    DuplicateName,
+    /// A reference does not resolve (unknown object type, missing property).
     BrokenReference,
-    /// Invalid property definition.
+    /// An object type declaration is inconsistent.
+    InvalidObjectType,
+    /// A property definition is invalid.
     InvalidProperty,
-    /// Invalid policy rule.
-    InvalidPolicy,
-    /// Invalid link configuration.
+    /// A trait declaration or application is invalid.
+    InvalidTrait,
+    /// A link type declaration is invalid.
     InvalidLink,
+    /// An action declaration is invalid.
+    InvalidAction,
     /// General validation failure.
     ValidationFailed,
-    /// Normalization issue.
-    NormalizationIssue,
-    /// Breaking change detected.
+    /// A change that breaks previously valid usage.
     BreakingChange,
     /// Custom code with a string identifier.
     Custom(String),

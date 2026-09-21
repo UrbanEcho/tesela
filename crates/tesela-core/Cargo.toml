@@ -8,10 +8,12 @@ repository.workspace = true
 description = "Core primitives for Tesela: identifiers, errors, diagnostics, and domain enums."
 
 [dependencies]
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-regex = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "value"
+harness = false

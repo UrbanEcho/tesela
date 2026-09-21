@@ -1,7 +1,7 @@
 //! Strongly-typed identifiers for Tesela.
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -23,7 +23,7 @@ pub struct ApiName(Arc<str>);
 
 /// A typed source for stable Tesela API names.
 ///
-/// Platform code should implement this trait for enums that name datasources,
+/// Platform code should implement this trait for enums that name backends,
 /// object types, fields, tools, and other durable contracts. This keeps string
 /// literals at the boundary of the enum implementation instead of spreading
 /// magic strings across ontology definitions.
@@ -44,48 +44,103 @@ impl ApiNameSource for &'static str {
 }
 
 impl ApiName {
-    /// Regex pattern for valid API names.
-    pub const PATTERN: &'static str = r"^[a-z][a-z0-9_]*$";
+    /// Description of the valid API name grammar, for error messages.
+    pub const PATTERN: &'static str = "[a-z][a-z0-9_]*";
 
     /// Create a new `ApiName`, validating the input.
     ///
     /// Returns an error if the string does not match the API name pattern.
     pub fn new<S: AsRef<str>>(s: S) -> Result<Self, crate::Error> {
         let s = s.as_ref();
-        if s.is_empty() {
-            return Err(crate::Error::validation("api_name cannot be empty"));
-        }
-        // Use a lazy_static or thread-local regex for performance.
-        // For simplicity in a core crate we compile once per call; in practice
-        // the caller should cache or use `lazy_regex`.
-        static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-        let re = RE.get_or_init(|| match Regex::new(ApiName::PATTERN) {
-            Ok(regex) => regex,
-            Err(error) => panic!("invalid ApiName pattern: {error}"),
-        });
-        if !re.is_match(s) {
+        if !Self::is_valid(s) {
             return Err(crate::Error::validation(format!(
-                "api_name '{}' does not match pattern {}",
-                s,
-                ApiName::PATTERN
+                "api_name '{s}' does not match pattern {pattern}",
+                pattern = Self::PATTERN
             )));
         }
         Ok(Self(Arc::from(s)))
     }
 
+    /// Whether a string is a valid API name.
+    ///
+    /// This is a byte scan rather than a regular expression: it is called on
+    /// every spec load and every name that crosses a language boundary, and it
+    /// needs no allocation.
+    #[must_use]
+    pub fn is_valid(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        match bytes.split_first() {
+            Some((first, rest)) => {
+                first.is_ascii_lowercase()
+                    && rest.iter().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_'
+                    })
+            }
+            None => false,
+        }
+    }
+
     /// Create an `ApiName` without validation.
     ///
-    /// # Safety
-    /// The caller must ensure the string matches the API name pattern.
-    /// Prefer `ApiName::new` or `parse` in production code.
+    /// The caller must ensure the string matches the API name pattern. Prefer
+    /// `ApiName::new` or `parse` in production code. Panics in debug builds if
+    /// the input is invalid, so mistakes surface in tests.
     pub fn new_unchecked<S: AsRef<str>>(s: S) -> Self {
-        Self(Arc::from(s.as_ref()))
+        let s = s.as_ref();
+        debug_assert!(
+            Self::is_valid(s),
+            "'{s}' is not a valid ApiName (must match {})",
+            Self::PATTERN
+        );
+        Self(Arc::from(s))
+    }
+
+    /// The name as a string slice.
+    ///
+    /// Borrowing is allocation-free, so this is the accessor to prefer over
+    /// `as_ref()` when the target type is inferred ambiguously.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl AsRef<str> for ApiName {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+/// Allows `BTreeMap<ApiName, V>::get("field")` and `HashMap<ApiName, V>::get`
+/// without constructing an `ApiName` — and therefore without an `Arc`
+/// allocation — on every lookup.
+impl Borrow<str> for ApiName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for ApiName {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for ApiName {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<ApiName> for str {
+    fn eq(&self, other: &ApiName) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<ApiName> for &str {
+    fn eq(&self, other: &ApiName) -> bool {
+        *self == other.as_str()
     }
 }
 
@@ -162,11 +217,29 @@ impl Version {
     pub fn new<S: AsRef<str>>(s: S) -> Self {
         Self(Arc::from(s.as_ref()))
     }
+
+    /// The version as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl AsRef<str> for Version {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl Borrow<str> for Version {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for Version {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
     }
 }
 

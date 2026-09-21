@@ -11,6 +11,7 @@ use std::ops::Deref;
 /// The ordering is best-effort: strings < numbers < booleans < null < arrays < objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
+#[repr(transparent)]
 pub struct Value(pub serde_json::Value);
 
 impl Value {
@@ -136,60 +137,125 @@ impl PartialOrd for Value {
     }
 }
 
-impl Ord for Value {
-    fn cmp(&self, other: &Self) -> Ordering {
-        use serde_json::Value as Json;
-        match (&self.0, &other.0) {
-            (Json::Null, Json::Null) => Ordering::Equal,
-            (Json::Null, _) => Ordering::Greater,
-            (_, Json::Null) => Ordering::Less,
-            (Json::Bool(a), Json::Bool(b)) => a.cmp(b),
-            (Json::Bool(_), _) => Ordering::Less,
-            (_, Json::Bool(_)) => Ordering::Greater,
-            (Json::Number(a), Json::Number(b)) => {
-                // Try integer comparison first, then float.
-                match (a.as_i64(), b.as_i64()) {
-                    (Some(ai), Some(bi)) => ai.cmp(&bi),
-                    _ => {
-                        let af = number_as_f64(a);
-                        let bf = number_as_f64(b);
-                        match af.partial_cmp(&bf) {
-                            Some(ordering) => ordering,
-                            None => Ordering::Equal,
+/// Ordering rank per JSON type, defining the cross-type order
+/// `null < bool < number < string < array < object`.
+const fn rank(value: &serde_json::Value) -> u8 {
+    match value {
+        serde_json::Value::Null => 0,
+        serde_json::Value::Bool(_) => 1,
+        serde_json::Value::Number(_) => 2,
+        serde_json::Value::String(_) => 3,
+        serde_json::Value::Array(_) => 4,
+        serde_json::Value::Object(_) => 5,
+    }
+}
+
+/// Compare two raw JSON values.
+///
+/// This is a free function rather than a method so that arrays and objects can
+/// recurse into it directly, without wrapping each element in a [`Value`] — the
+/// wrapper is what made the previous implementation allocate and clone on every
+/// comparison.
+fn cmp_json(left: &serde_json::Value, right: &serde_json::Value) -> Ordering {
+    use serde_json::Value as Json;
+    match (left, right) {
+        (Json::Null, Json::Null) => Ordering::Equal,
+        (Json::Bool(left), Json::Bool(right)) => left.cmp(right),
+        (Json::Number(left), Json::Number(right)) => cmp_number(left, right),
+        (Json::String(left), Json::String(right)) => left.cmp(right),
+        (Json::Array(left), Json::Array(right)) => left
+            .len()
+            .cmp(&right.len())
+            .then_with(|| cmp_slices(left, right)),
+        // `serde_json::Map` keeps its keys sorted, so zipping the two iterators
+        // walks both in the same canonical order. No side is materialised.
+        (Json::Object(left), Json::Object(right)) => left.len().cmp(&right.len()).then_with(|| {
+            let mut left = left.iter();
+            let mut right = right.iter();
+            loop {
+                match (left.next(), right.next()) {
+                    (None, None) => return Ordering::Equal,
+                    (None, Some(_)) => return Ordering::Less,
+                    (Some(_), None) => return Ordering::Greater,
+                    (Some((left_key, left_value)), Some((right_key, right_value))) => {
+                        match left_key.cmp(right_key) {
+                            Ordering::Equal => {}
+                            other => return other,
+                        }
+                        match cmp_json(left_value, right_value) {
+                            Ordering::Equal => {}
+                            other => return other,
                         }
                     }
                 }
             }
-            (Json::Number(_), _) => Ordering::Less,
-            (_, Json::Number(_)) => Ordering::Greater,
-            (Json::String(a), Json::String(b)) => a.cmp(b),
-            (Json::String(_), _) => Ordering::Less,
-            (_, Json::String(_)) => Ordering::Greater,
-            (Json::Array(a), Json::Array(b)) => a.len().cmp(&b.len()).then_with(|| {
-                a.iter()
-                    .map(|v| Value::new(v.clone()))
-                    .cmp(b.iter().map(|v| Value::new(v.clone())))
-            }),
-            (Json::Array(_), _) => Ordering::Less,
-            (_, Json::Array(_)) => Ordering::Greater,
-            (Json::Object(a), Json::Object(b)) => a.len().cmp(&b.len()).then_with(|| {
-                let mut av: Vec<(&String, Value)> =
-                    a.iter().map(|(k, v)| (k, Value::new(v.clone()))).collect();
-                let mut bv: Vec<(&String, Value)> =
-                    b.iter().map(|(k, v)| (k, Value::new(v.clone()))).collect();
-                av.sort_by(|a, b| a.0.cmp(b.0));
-                bv.sort_by(|a, b| a.0.cmp(b.0));
-                av.cmp(&bv)
-            }),
+        }),
+        (left, right) => rank(left).cmp(&rank(right)),
+    }
+}
+
+/// Compare two JSON arrays element-wise.
+fn cmp_slices(left: &[serde_json::Value], right: &[serde_json::Value]) -> Ordering {
+    let mut left = left.iter();
+    let mut right = right.iter();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left), Some(right)) => match cmp_json(left, right) {
+                Ordering::Equal => {}
+                other => return other,
+            },
         }
     }
 }
 
-fn number_as_f64(value: &serde_json::Number) -> f64 {
-    if let Some(number) = value.as_f64() {
-        return number;
+/// Compare JSON numbers without collapsing distinct JSON representations.
+/// This keeps `Ord` consistent with `Eq`: `1`, an unsigned integer outside the
+/// signed range, and `1.0` occupy distinct variants even when their numeric
+/// magnitudes can be represented by the same float.
+fn cmp_number(left: &serde_json::Number, right: &serde_json::Number) -> Ordering {
+    enum NumberRef {
+        Signed(i64),
+        Unsigned(u64),
+        Float(u64),
     }
-    f64::NAN
+    impl NumberRef {
+        const fn rank(&self) -> u8 {
+            match self {
+                Self::Signed(_) => 0,
+                Self::Unsigned(_) => 1,
+                Self::Float(_) => 2,
+            }
+        }
+    }
+    fn classify(value: &serde_json::Number) -> NumberRef {
+        if let Some(value) = value.as_i64() {
+            NumberRef::Signed(value)
+        } else if let Some(value) = value.as_u64() {
+            NumberRef::Unsigned(value)
+        } else {
+            NumberRef::Float(value.as_f64().unwrap_or(f64::NAN).to_bits())
+        }
+    }
+    let left = classify(left);
+    let right = classify(right);
+    match (&left, &right) {
+        (NumberRef::Signed(left), NumberRef::Signed(right)) => left.cmp(right),
+        (NumberRef::Unsigned(left), NumberRef::Unsigned(right)) => left.cmp(right),
+        (NumberRef::Float(left), NumberRef::Float(right)) => left.cmp(right),
+        _ => left.rank().cmp(&right.rank()),
+    }
+}
+
+impl Ord for Value {
+    /// Compare two values without allocating.
+    ///
+    /// Ordering, equality, and hashing use the same exact JSON semantics.
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_json(&self.0, &other.0)
+    }
 }
 
 impl Default for Value {

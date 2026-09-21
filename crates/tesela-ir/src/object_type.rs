@@ -1,22 +1,25 @@
-//! Object type, trait, and property metadata.
+//! Object types, traits and properties.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use tesela_core::{ApiName, DataType, Value};
 
-/// A reusable trait for object types.
+/// A reusable bundle of properties.
+///
+/// A trait is *semantic* inheritance: an object type that declares a trait gets
+/// the trait's properties, materialized into the object type at compile time
+/// with their origin recorded so collisions can be reported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trait {
     /// API name.
     pub api_name: ApiName,
     /// Display name.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
     /// Description.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Properties defined by the trait.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    /// Properties the trait contributes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<Property>,
 }
 
@@ -26,42 +29,38 @@ pub struct ObjectType {
     /// API name.
     pub api_name: ApiName,
     /// Display name.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
     /// Description.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Physical source mapping.
-    pub source: ObjectSource,
-    /// Primary key property.
+    /// The property that identifies a record.
+    ///
+    /// This must name a property the object type declares, directly or through
+    /// a trait; the compiler rejects a primary key that does not resolve.
     pub primary_key: ApiName,
-    /// Properties.
+    /// Properties declared by this object type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<Property>,
     /// Traits this object type implements.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traits: Vec<ApiName>,
     /// Tags for categorization.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// Metadata.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub metadata: Option<BTreeMap<String, Value>>,
-    /// Indexes.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub indexes: Vec<Index>,
-    /// Deprecation timestamp.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// When this object type was deprecated, as an ISO-8601 instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated_at: Option<String>,
 }
 
-/// Physical source mapping for an object type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectSource {
-    /// Datasource API name.
-    pub datasource: ApiName,
-    /// Optional resource name.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub resource: Option<String>,
+impl ObjectType {
+    /// Look a declared property up by name.
+    #[must_use]
+    pub fn property(&self, name: &str) -> Option<&Property> {
+        self.properties
+            .iter()
+            .find(|property| property.api_name == name)
+    }
 }
 
 /// A property on an object type or trait.
@@ -70,56 +69,81 @@ pub struct Property {
     /// API name.
     pub api_name: ApiName,
     /// Display name.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
     /// Description.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Data type.
     pub data_type: DataType,
-    /// Whether NULL is allowed.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Whether `null` is an acceptable value.
+    ///
+    /// Absent means the property is required, which is the safe default: a
+    /// property becomes optional only when its author says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
-    /// Whether indexed.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub indexed: Option<bool>,
-    /// Whether unique.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub unique: Option<bool>,
-    /// Tags.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub tags: Vec<String>,
-    /// Markings.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub markings: Vec<String>,
-    /// Default value.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Value applied when a create omits the property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
-    /// Source column mapping.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub source_column: Option<String>,
-    /// Allowed enum values.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// The closed set of values this property accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_values: Option<Vec<Value>>,
-    /// Sort order hint.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub sort_order: Option<String>,
-    /// Metadata.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub metadata: Option<BTreeMap<String, Value>>,
-    /// Whether this field is encrypted by the platform store.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub encrypted: Option<bool>,
+    /// Tags for categorization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
-/// Index definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Index {
-    /// API name.
-    pub api_name: ApiName,
-    /// Properties included in the index.
-    pub properties: Vec<ApiName>,
-    /// Whether unique.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub unique: Option<bool>,
+impl Property {
+    /// Whether a record must supply this property.
+    #[must_use]
+    pub fn is_required(&self) -> bool {
+        self.nullable != Some(true)
+    }
+
+    /// Whether this property accepts the given value.
+    ///
+    /// A property with no declared `allowed_values` accepts anything; one with
+    /// a declared set accepts only members of it. `null` is handled by
+    /// [`Property::is_required`], not here.
+    #[must_use]
+    pub fn allows(&self, value: &Value) -> bool {
+        match &self.allowed_values {
+            Some(allowed) => allowed.iter().any(|candidate| candidate == value),
+            None => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn property(name: &'static str, nullable: Option<bool>) -> Property {
+        Property {
+            api_name: ApiName::from(name),
+            display: None,
+            description: None,
+            data_type: DataType::String,
+            nullable,
+            default: None,
+            allowed_values: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn properties_are_required_by_default() {
+        assert!(property("email", None).is_required());
+        assert!(property("email", Some(false)).is_required());
+        assert!(!property("email", Some(true)).is_required());
+    }
+
+    #[test]
+    fn allowed_values_gate_membership() {
+        let mut status = property("status", None);
+        assert!(status.allows(&Value::string("anything")));
+        status.allowed_values = Some(vec![Value::string("active")]);
+        assert!(status.allows(&Value::string("active")));
+        assert!(!status.allows(&Value::string("closed")));
+    }
 }

@@ -68,6 +68,91 @@ pub fn execute_residual<'a>(
     })
 }
 
+/// Execute a residual query while taking ownership of a streaming scan.
+///
+/// Unlike [`execute_residual`], this form never needs a full input collection:
+/// unsorted scans retain only one page and sorted scans retain only top-k.
+#[inline]
+pub fn execute_residual_owned(
+    records: impl IntoIterator<Item = Record>,
+    query: &Query,
+) -> Result<Page, Error> {
+    execute_residual_try_owned(records.into_iter().map(Ok), query)
+}
+
+/// Execute a streaming residual query whose record conversion can fail.
+#[inline]
+pub fn execute_residual_try_owned(
+    records: impl IntoIterator<Item = Result<Record, Error>>,
+    query: &Query,
+) -> Result<Page, Error> {
+    let offset = resolve_offset(query);
+    let limit = query.limit.unwrap_or(1000).max(0) as usize;
+    let filter = query
+        .filter
+        .as_ref()
+        .map(CompiledResidualFilter::compile)
+        .transpose()?;
+    if query.sort.is_empty() {
+        let mut rows = Vec::with_capacity(limit.saturating_add(1));
+        let mut matched = 0usize;
+        for record in records {
+            let record = record?;
+            if !filter
+                .as_ref()
+                .is_none_or(|item| item.matches(&record.values))
+            {
+                continue;
+            }
+            if matched >= offset {
+                rows.push(record);
+                if rows.len() > limit {
+                    break;
+                }
+            }
+            matched = matched.saturating_add(1);
+        }
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        return Ok(Page {
+            records: rows,
+            next_cursor: has_more.then(|| (offset + limit).to_string()),
+        });
+    }
+    let keep = offset.saturating_add(limit).saturating_add(1);
+    let mut heap = BinaryHeap::with_capacity(keep);
+    for record in records {
+        let record = record?;
+        if !filter
+            .as_ref()
+            .is_none_or(|item| item.matches(&record.values))
+        {
+            continue;
+        }
+        let entry = OwnedRankedRecord {
+            record,
+            sort: &query.sort,
+        };
+        if heap.len() < keep {
+            heap.push(entry);
+        } else if heap.peek().is_some_and(|worst| entry < *worst) {
+            heap.pop();
+            heap.push(entry);
+        }
+    }
+    let rows = heap.into_sorted_vec();
+    let has_more = rows.len() > offset.saturating_add(limit);
+    Ok(Page {
+        records: rows
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|item| item.record)
+            .collect(),
+        next_cursor: has_more.then(|| (offset + limit).to_string()),
+    })
+}
+
 #[inline]
 fn unsorted_page<'a>(
     records: impl Iterator<Item = &'a Record>,
@@ -115,6 +200,27 @@ impl PartialOrd for RankedRecord<'_> {
 impl Ord for RankedRecord<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         compare_records(self.record, other.record, self.sort)
+    }
+}
+
+struct OwnedRankedRecord<'a> {
+    record: Record,
+    sort: &'a [Sort],
+}
+impl PartialEq for OwnedRankedRecord<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        compare_records(&self.record, &other.record, self.sort).is_eq()
+    }
+}
+impl Eq for OwnedRankedRecord<'_> {}
+impl PartialOrd for OwnedRankedRecord<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OwnedRankedRecord<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_records(&self.record, &other.record, self.sort)
     }
 }
 
@@ -250,6 +356,7 @@ fn evaluate_scalar(
         FilterOp::Gte => compare(|left, right| left >= right),
         FilterOp::Contains => strings(|actual, expected| actual.contains(expected)),
         FilterOp::StartsWith => strings(|actual, expected| actual.starts_with(expected)),
+        FilterOp::EndsWith => strings(|actual, expected| actual.ends_with(expected)),
         FilterOp::Between => actual.is_some_and(|actual| {
             values
                 .first()

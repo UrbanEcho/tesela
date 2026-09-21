@@ -15,5 +15,5 @@ mod traits;
 #[cfg(any(feature = "dev", test))]
 pub use memory::MemoryBackend;
 pub use query::*;
-pub use residual::execute_residual;
+pub use residual::{execute_residual, execute_residual_owned, execute_residual_try_owned};
 pub use traits::*;

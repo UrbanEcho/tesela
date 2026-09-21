@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tesela"
+version = "0.2.0"
+description = "Embedded semantic capability runtime"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Miguel Cárdenas" }]
+
+[dependency-groups]
+dev = ["pyright>=1.1.405", "pytest>=8"]
+
+[tool.pyright]
+include = ["python/tesela"]
+typeCheckingMode = "strict"
+
+[tool.maturin]
+manifest-path = "crates/tesela-py/Cargo.toml"
+python-source = "python"
+module-name = "tesela._native"
+features = ["pyo3/abi3-py310"]

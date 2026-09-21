@@ -1,0 +1,14 @@
+[package]
+name = "tesela-capability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Agent-facing semantic capability catalogs, result handles, and ontology diffs."
+
+[dependencies]
+tesela-core = { workspace = true }
+tesela-ir = { workspace = true }
+serde = { workspace = true }
+

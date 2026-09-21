@@ -3,8 +3,8 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
-use tesela::error::Error;
-use tesela::model::ApiName;
+use tesela::Error;
+use tesela::raw::ApiName;
 
 use crate::TeselaError;
 
@@ -140,7 +140,9 @@ pub(crate) fn runtime_error(error: Error) -> PyErr {
     let code = error.code().as_str();
     let retryable = error.is_retryable();
     let side_effect = error.side_effect().as_str();
-    let recovery = error.recovery().map(tesela::error::Recovery::as_str);
+    let recovery = error.recovery().map(tesela::raw::Recovery::as_str);
+    let resource_kind = error.resource_kind().map(|kind| kind.as_str());
+    let resource = error.resource();
     let exception = PyErr::new::<TeselaError, _>(error.to_string());
     Python::attach(|py| {
         let value = exception.value(py);
@@ -148,6 +150,8 @@ pub(crate) fn runtime_error(error: Error) -> PyErr {
         let _ = value.setattr("retryable", retryable);
         let _ = value.setattr("side_effect", side_effect);
         let _ = value.setattr("recovery", recovery);
+        let _ = value.setattr("resource_kind", resource_kind);
+        let _ = value.setattr("resource", resource);
     });
     exception
 }

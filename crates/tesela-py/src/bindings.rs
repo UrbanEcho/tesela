@@ -1,29 +1,45 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use tesela::backend::{
-    ActionExecutor, Backend, BackendCapabilities, BindingsBuilder, LinkResolver,
-};
-use tesela::dev::MemoryBackend;
-use tesela::error::Error;
-use tesela::model::{
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use tesela::Error;
+use tesela::raw::MemoryBackend;
+use tesela::raw::{ActionExecutor, Backend, BackendCapabilities, BindingsBuilder, LinkResolver};
+use tesela::raw::{ActionRequest, AggregateQuery, Mutation, Query, Runtime};
+use tesela::raw::{
     ActionResult, AggregateResult, ApiName, Key, MutationResult, Page, Record, Spec, Value,
 };
-use tesela::policy::{
-    AllowAllPolicy, ExecutionContext, PolicyDecision, PolicyEngine, PolicyRequest, Principal,
-};
-use tesela::query::{ActionRequest, AggregateQuery, Mutation, Query};
-use tesela::runtime::Runtime;
+use tesela::raw::{ExecutionContext, PolicyDecision, PolicyEngine, PolicyRequest};
 
 use crate::TeselaError;
-use crate::conversion::{callback, decode, encode, name, py_to_json, runtime_error};
+use crate::conversion::{callback, decode, encode, name, runtime_error};
+
+#[path = "python_context.rs"]
+mod python_context;
+use python_context::context_from_py;
+
+fn context_payload(context: &ExecutionContext) -> serde_json::Value {
+    serde_json::json!({
+        "principal": context.principal(),
+        "request_id": context.request_id(),
+        "approvals": context.approvals(),
+        "authority": context.authority(),
+        "deadline_seconds": context.remaining().map(|duration| duration.as_secs_f64()),
+        "budget": {
+            "calls": context.budget().backend_calls,
+            "rows": context.budget().rows,
+            "bytes": context.budget().bytes,
+            "external_cost": context.budget().external_cost,
+            "wall_time_seconds": context.budget().wall_time.map(|duration| duration.as_secs_f64()),
+        },
+        "cancelled": context.is_cancelled(),
+    })
+}
 
 struct PythonBackend {
     object: Py<PyAny>,
     capabilities: BackendCapabilities,
+    scan: bool,
 }
 impl Backend for PythonBackend {
     fn backend_type(&self) -> &str {
@@ -32,22 +48,35 @@ impl Backend for PythonBackend {
     fn capabilities(&self) -> BackendCapabilities {
         self.capabilities.clone()
     }
-    fn search(&self, object: &ApiName, query: &Query) -> Result<Page, Error> {
-        callback(
-            &self.object,
-            "search",
-            serde_json::json!({"object_type":object,"query":query}),
-        )
+    fn search(
+        &self,
+        context: &ExecutionContext,
+        object: &ApiName,
+        query: &Query,
+    ) -> Result<Page, Error> {
+        let payload = serde_json::json!({"context":context_payload(context),"object_type":object,"query":query});
+        if self.scan {
+            let records: Vec<Record> = callback(&self.object, "scan", payload)?;
+            tesela::raw::execute_residual(records.iter(), query)
+        } else {
+            callback(&self.object, "search", payload)
+        }
     }
-    fn get(&self, object: &ApiName, key: &Key) -> Result<Option<Record>, Error> {
+    fn get(
+        &self,
+        context: &ExecutionContext,
+        object: &ApiName,
+        key: &Key,
+    ) -> Result<Option<Record>, Error> {
         callback(
             &self.object,
             "get",
-            serde_json::json!({"object_type":object,"primary_key":key}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"primary_key":key}),
         )
     }
     fn create(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: Key,
         values: BTreeMap<ApiName, Value>,
@@ -55,49 +84,53 @@ impl Backend for PythonBackend {
         callback(
             &self.object,
             "create",
-            serde_json::json!({"object_type":object,"primary_key":key,"values":values}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"primary_key":key,"values":values}),
         )
     }
     fn update(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: &Key,
         values: BTreeMap<ApiName, Value>,
-        expected: Option<&tesela::model::Revision>,
+        expected: Option<&tesela::raw::Revision>,
     ) -> Result<MutationResult, Error> {
         callback(
             &self.object,
             "update",
-            serde_json::json!({"object_type":object,"primary_key":key,"values":values,"expected_revision":expected}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"primary_key":key,"values":values,"expected_revision":expected}),
         )
     }
     fn delete(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: &Key,
-        expected: Option<&tesela::model::Revision>,
+        expected: Option<&tesela::raw::Revision>,
     ) -> Result<MutationResult, Error> {
         callback(
             &self.object,
             "delete",
-            serde_json::json!({"object_type":object,"primary_key":key,"expected_revision":expected}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"primary_key":key,"expected_revision":expected}),
         )
     }
     fn upsert(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: Key,
         values: BTreeMap<ApiName, Value>,
-        expected: Option<&tesela::model::Revision>,
+        expected: Option<&tesela::raw::Revision>,
     ) -> Result<MutationResult, Error> {
         callback(
             &self.object,
             "upsert",
-            serde_json::json!({"object_type":object,"primary_key":key,"values":values,"expected_revision":expected}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"primary_key":key,"values":values,"expected_revision":expected}),
         )
     }
     fn batch(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         primary_key: &ApiName,
         mutations: &[Mutation],
@@ -105,18 +138,19 @@ impl Backend for PythonBackend {
         callback(
             &self.object,
             "batch",
-            serde_json::json!({"object_type":object,"primary_key":primary_key,"mutations":mutations}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"primary_key":primary_key,"mutations":mutations}),
         )
     }
     fn aggregate(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         query: &AggregateQuery,
     ) -> Result<AggregateResult, Error> {
         callback(
             &self.object,
             "aggregate",
-            serde_json::json!({"object_type":object,"query":query}),
+            serde_json::json!({"context":context_payload(context),"object_type":object,"query":query}),
         )
     }
 }
@@ -125,6 +159,7 @@ struct PythonLink(Py<PyAny>);
 impl LinkResolver for PythonLink {
     fn linked_keys(
         &self,
+        context: &ExecutionContext,
         link: &ApiName,
         target: &ApiName,
         source: &Key,
@@ -132,7 +167,7 @@ impl LinkResolver for PythonLink {
         callback(
             &self.0,
             "linked_keys",
-            serde_json::json!({"link":link,"target":target,"source_key":source}),
+            serde_json::json!({"context":context_payload(context),"link":link,"target":target,"source_key":source}),
         )
     }
 }
@@ -146,7 +181,7 @@ impl ActionExecutor for PythonAction {
         callback(
             &self.0,
             "execute",
-            serde_json::json!({"principal":context.principal(),"request":request}),
+            serde_json::json!({"context":context_payload(context),"request":request}),
         )
     }
 }
@@ -156,7 +191,7 @@ impl PolicyEngine for PythonPolicy {
         callback(
             &self.0,
             "evaluate",
-            serde_json::json!({"request":{"principal":request.context.principal(),"operation":request.operation,"resource_kind":request.resource_kind,"resource":request.resource,"input":request.input}}),
+            serde_json::json!({"request":{"context":context_payload(request.context),"operation":request.operation,"resource_kind":request.resource_kind,"resource":request.resource,"input":request.input}}),
         )
     }
 }
@@ -199,29 +234,40 @@ impl NativeRuntime {
         let mut bindings = BindingsBuilder::new();
         for (key, value) in objects {
             let object = name(&key.extract::<String>()?)?;
-            let backend: Arc<dyn Backend> = if let Ok(memory) =
-                value.extract::<PyRef<'_, NativeMemoryBackend>>()
-            {
-                memory.inner.clone()
-            } else {
-                let object = value.unbind();
-                let has =
-                    |method| Python::attach(|py| object.bind(py).hasattr(method)).unwrap_or(false);
-                Arc::new(PythonBackend {
-                    capabilities: BackendCapabilities {
-                        search: has("search"),
-                        get: has("get"),
-                        create: has("create"),
-                        update: has("update"),
-                        delete: has("delete"),
-                        upsert: has("upsert"),
-                        batch: has("batch"),
-                        aggregate: has("aggregate"),
-                        conditional_mutation: has("update") || has("delete") || has("upsert"),
-                    },
-                    object,
-                })
-            };
+            let backend: Arc<dyn Backend> =
+                if let Ok(memory) = value.extract::<PyRef<'_, NativeMemoryBackend>>() {
+                    memory.inner.clone()
+                } else {
+                    let object = value.unbind();
+                    let declared = Python::attach(|py| {
+                        object
+                            .bind(py)
+                            .getattr("__tesela_capabilities__")
+                            .and_then(|value| value.extract::<Vec<String>>())
+                    })
+                    .unwrap_or_default();
+                    let has = |method: &str| {
+                        declared.iter().any(|value| value == method)
+                            || (declared.is_empty()
+                                && Python::attach(|py| object.bind(py).hasattr(method))
+                                    .unwrap_or(false))
+                    };
+                    Arc::new(PythonBackend {
+                        capabilities: BackendCapabilities {
+                            search: has("search") || has("scan"),
+                            get: has("get"),
+                            create: has("create"),
+                            update: has("update"),
+                            delete: has("delete"),
+                            upsert: has("upsert"),
+                            batch: has("batch"),
+                            aggregate: has("aggregate"),
+                            conditional_mutation: has("update") || has("delete") || has("upsert"),
+                        },
+                        scan: has("scan") && !has("search"),
+                        object,
+                    })
+                };
             bindings.bind_object(object, backend);
         }
         if let Some(links) = links {
@@ -240,12 +286,7 @@ impl NativeRuntime {
                 );
             }
         }
-        let policy: Arc<dyn PolicyEngine> =
-            if policy.extract::<String>().ok().as_deref() == Some("allow_all") {
-                Arc::new(AllowAllPolicy)
-            } else {
-                Arc::new(PythonPolicy(policy.clone().unbind()))
-            };
+        let policy: Arc<dyn PolicyEngine> = Arc::new(PythonPolicy(policy.clone().unbind()));
         Ok(Self {
             inner: Runtime::builder(spec, bindings.build(), policy)
                 .max_query_limit(max_query_limit)
@@ -288,6 +329,22 @@ impl NativeRuntime {
             &self
                 .inner
                 .get(&context, &name(object)?, &decode(key)?)
+                .map_err(runtime_error)?,
+        )
+    }
+    fn lookup(
+        &self,
+        py: Python<'_>,
+        context: &Bound<'_, PyAny>,
+        object: &str,
+        key: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let context = context_from_py(context)?;
+        encode(
+            py,
+            &self
+                .inner
+                .lookup(&context, &name(object)?, &decode(key)?)
                 .map_err(runtime_error)?,
         )
     }
@@ -368,33 +425,21 @@ impl NativeRuntime {
                 .map_err(runtime_error)?,
         )
     }
-}
-
-fn context_from_py(value: &Bound<'_, PyAny>) -> PyResult<ExecutionContext> {
-    let data = py_to_json(value)?;
-    let id = data
-        .get("principal")
-        .and_then(|item| item.get("id"))
-        .or_else(|| data.get("id"))
-        .or_else(|| data.get("user_id"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| PyValueError::new_err("context requires principal.id"))?;
-    let mut principal = Principal::new(id);
-    if let Some(claims) = data
-        .get("principal")
-        .and_then(|item| item.get("claims"))
-        .or_else(|| data.get("claims"))
-    {
-        principal.claims = serde_json::from_value(claims.clone())
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    fn explain(
+        &self,
+        py: Python<'_>,
+        context: &Bound<'_, PyAny>,
+        object: &str,
+        query: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        encode(
+            py,
+            &self
+                .inner
+                .explain(&context_from_py(context)?, &name(object)?, &decode(query)?)
+                .map_err(runtime_error)?,
+        )
     }
-    ExecutionContext::trusted(
-        principal,
-        data.get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("python"),
-    )
-    .map_err(runtime_error)
 }
 
 #[pyfunction]

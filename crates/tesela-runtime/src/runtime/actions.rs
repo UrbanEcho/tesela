@@ -86,12 +86,14 @@ impl Runtime {
             let key = primary_key(subject, &values)?;
             let backend = object_backend(&snapshot, subject)?;
             context.charge_backend_call()?;
-            let record = backend.get(subject.api_name(), &key)?.ok_or_else(|| {
-                Error::new(
-                    ErrorCode::PreconditionFailed,
-                    "action subject does not exist",
-                )
-            })?;
+            let record = backend
+                .get(context, subject.api_name(), &key)?
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::PreconditionFailed,
+                        "action subject does not exist",
+                    )
+                })?;
             if let Some(expected) = &request.expected_revision
                 && record.revision.as_ref() != Some(expected)
             {

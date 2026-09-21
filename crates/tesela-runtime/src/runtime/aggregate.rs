@@ -34,28 +34,38 @@ impl Runtime {
         }
         let backend = object_backend(&snapshot, object_type)?;
         context.charge_backend_call()?;
-        let mut accumulator = AggregateAccumulator::new(&query, &decision.redactions);
-        let mut cursor = None;
-        loop {
-            let page = backend.search(
-                object,
-                &Query {
-                    filter: filter.clone(),
-                    limit: Some(self.max_query_limit as i32),
-                    cursor: cursor.clone(),
-                    ..Query::default()
-                },
-            )?;
-            context.charge_rows(page.records.len() as u64)?;
-            context.charge_bytes(records_bytes(&page.records))?;
-            accumulator.extend(&page.records);
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
+        let mut effective = query.clone();
+        effective.filter = filter.clone();
+        effective
+            .group_by
+            .retain(|field| !decision.redactions.contains(field));
+        let result = if backend.capabilities().aggregate {
+            backend.aggregate(context, object, &effective)?
+        } else {
+            let mut accumulator = AggregateAccumulator::new(&query, &decision.redactions);
+            let mut cursor = None;
+            loop {
+                let page = backend.search(
+                    context,
+                    object,
+                    &Query {
+                        filter: filter.clone(),
+                        limit: Some(self.max_query_limit as i32),
+                        cursor: cursor.clone(),
+                        ..Query::default()
+                    },
+                )?;
+                context.charge_rows(page.records.len() as u64)?;
+                context.charge_bytes(records_bytes(&page.records))?;
+                accumulator.extend(&page.records);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+                context.charge_backend_call()?;
             }
-            context.charge_backend_call()?;
-        }
-        let result = accumulator.finish();
+            accumulator.finish()
+        };
         Ok(self.finish(
             context,
             &snapshot,
@@ -115,6 +125,7 @@ impl Runtime {
             });
         if source_backend
             .search(
+                context,
                 source.api_name(),
                 &Query {
                     filter: Some(source_filter),
@@ -152,7 +163,7 @@ impl Runtime {
             .and_then(Option::as_ref)
             .ok_or_else(|| Error::unsupported(format!("link '{link_name}' is not bound")))?;
         context.charge_backend_call()?;
-        let keys = resolver.linked_keys(link_name, target.api_name(), &query.source_pk)?;
+        let keys = resolver.linked_keys(context, link_name, target.api_name(), &query.source_pk)?;
         let target_backend = object_backend(&snapshot, target)?;
         let mut base_filter = query.filter;
         for policy in [
@@ -181,6 +192,7 @@ impl Runtime {
             }));
             context.charge_backend_call()?;
             let page = target_backend.search(
+                context,
                 target.api_name(),
                 &Query {
                     filter,

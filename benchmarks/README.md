@@ -1,24 +1,32 @@
-# Reproducible baseline
+# Performance methodology
 
-Use a release build and the installed Python wheel. Both scripts create one object type, 100 in-memory records and run 10,000 iterations of parse, serialize, search, get and upsert. `search.100` returns 100 records. Timings are descriptive baselines, not CI thresholds.
+Criterion suites cover value/key behavior and the development backend query path. The public Rust example and Python script cover conversion plus runtime overhead.
 
 ```bash
+cargo bench -p tesela-core --bench value
+cargo bench -p tesela-backend --features dev --bench memory
 cargo run --release -p tesela --example baseline
 python benchmarks/baseline.py
 ```
 
-Run on the same host, record CPU, OS, Rust/Python versions and use the median of three runs when comparing a change. Rust and Python timings include their respective public API conversion costs.
+Use a release build, record CPU/OS/compiler/interpreter versions, and compare the median of at least three same-host runs. `cargo bench --workspace --exclude tesela-py -- --test` is only a compile/panic smoke gate.
 
-## v0.1.0 local baseline
+## Pre-refactor evidence
 
-Measured 2026-09-15 on arm64 macOS 26.5.2, Rust 1.98.0 and Python 3.13.12. Both used release-optimized Rust; values are medians of three runs, in microseconds per operation.
+The 2026-09-19 Apple M5 Pro baseline identified the architectural hot spots:
 
-| Operation | Rust | Python wheel |
-|---|---:|---:|
-| Spec parse | 1.869 | 14.343 |
-| Spec serialize | 0.587 | 13.965 |
-| Search 100 rows | 14.987 | 71.836 |
-| Get | 0.440 | 3.455 |
-| Upsert | 0.798 | 5.762 |
+| Operation, 10,000 rows | Median |
+|---|---:|
+| unsorted search → 100 | 1.11 ms |
+| `LIKE` search → 100 | 1.73 ms |
+| 100-value `IN` → 100 | 2.30 ms |
+| grouped count | 1.83 ms |
+| primary-key get | 206 ns |
 
-Python timings include JSON conversion at the binding boundary and dictionary creation for results. They establish a comparison point; no regression threshold is enforced yet.
+These figures are evidence, not portable thresholds. Acceptance is also algorithmic: an unsorted limited scan stops after `limit + 1`; `IN` is linear in rows; `LIKE` compiles once; sorted bounded search retains top-k references rather than cloned matches; aggregation memory scales with groups; snapshot reads are lock-free.
+
+## Profiling
+
+Use Instruments on macOS for wall-time/allocation traces. DHAT or Callgrind can be enabled on Linux for allocation and instruction profiles. Profile only after a benchmark establishes a regression or uncertain hotspot. Rayon is intentionally absent until isolated sequential/parallel measurements demonstrate a stable crossover.
+
+The active policy regression tests are in [`crates/tesela-runtime/tests/policy_isolation.rs`](../crates/tesela-runtime/tests/policy_isolation.rs). They verify filtered `get`, scoped mutation, source/target traversal isolation, redacted aggregation keys, and policy transformations as ordinary non-ignored tests.

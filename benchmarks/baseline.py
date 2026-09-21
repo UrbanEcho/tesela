@@ -1,8 +1,9 @@
-"""Reproducible Python entrypoint over the same native MemoryStore workload."""
+"""Public Python-path benchmark using direct PyO3 values."""
 
+from dataclasses import dataclass
 from time import perf_counter
 
-from tesela import MemoryStore, Runtime, Spec
+from tesela import MemoryBackend, Runtime, Spec
 
 
 def measure(label, work, count=10_000):
@@ -14,24 +15,23 @@ def measure(label, work, count=10_000):
 
 def main():
     spec = Spec()
-    spec.datasource("memory")
 
-    @spec.object_type(datasource="memory", primary_key="id")
+    @spec.object_type(primary_key="id")
+    @dataclass
     class Customer:
         id: str
         score: int
 
-    actor = {"user_id": "bench"}
-    runtime = Runtime(spec, stores={"memory": MemoryStore()}, policy="allow_all")
+    runtime = Runtime(spec, objects={Customer: MemoryBackend()}, policy="allow_all")
     for number in range(100):
-        runtime.mutate("customer", {"create": {"values": {"id": str(number), "score": number}}}, actor=actor)
+        runtime.mutate(Customer, {"create": {"values": {"id": str(number), "score": number}}})
     document = spec.to_json()
     update = {"upsert": {"values": {"id": "0", "score": 1}}}
     measure("spec.parse", lambda: Spec.from_json(document))
     measure("spec.serialize", spec.to_json)
-    measure("search.100", lambda: runtime.search("customer", actor=actor))
-    measure("get", lambda: runtime.get("customer", "0", actor=actor))
-    measure("mutate.upsert", lambda: runtime.mutate("customer", update, actor=actor))
+    measure("search.100", lambda: runtime.search(Customer))
+    measure("get", lambda: runtime.get(Customer, "0"))
+    measure("mutate.upsert", lambda: runtime.mutate(Customer, update))
 
 
 if __name__ == "__main__":

@@ -1,218 +1,271 @@
-//! `#[action]` attribute macro implementation.
+//! `#[derive(Action)]` implementation.
 
-use crate::helpers::type_to_string;
-use darling::FromMeta;
+use crate::helpers::{is_option, tesela_attrs, to_snake_case, type_to_string, unsupported_attr};
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::parse_macro_input;
+use quote::quote;
+use syn::{DeriveInput, Ident, Type, parse_macro_input};
 
-#[derive(Debug, Default, FromMeta)]
-struct ActionArgs {
-    #[darling(default)]
-    subject: Option<String>,
-    #[darling(default)]
-    risk: Option<String>,
-    #[darling(default)]
-    effects: Option<String>,
-    #[darling(default)]
-    idempotent: darling::util::Flag,
-    #[darling(default)]
-    concurrency: Option<String>,
-    #[darling(default)]
-    display: Option<String>,
-    #[darling(default)]
-    description: Option<String>,
+#[derive(Default)]
+struct Args {
+    subject: Option<Type>,
+    returns: Option<Type>,
+    reads: Vec<Type>,
+    writes: Vec<Type>,
+    creates: Vec<Type>,
+    external: Vec<String>,
+    pure: bool,
+    idempotent: bool,
+    concurrency: Option<Ident>,
+    approval: Option<Ident>,
+    risk: Option<Ident>,
+    requires_revision: bool,
 }
 
-pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = match darling::ast::NestedMeta::parse_meta_list(args.into()) {
-        Ok(value) => value,
-        Err(error) => return TokenStream::from(error.to_compile_error()),
-    };
-    if let Some(error) = reject_removed(&attr_args) {
-        return TokenStream::from(error.to_compile_error());
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_checked(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+fn expand_checked(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = &input.ident;
+    let args = parse_args(&input)?;
+    if !args.pure
+        && args.reads.is_empty()
+        && args.writes.is_empty()
+        && args.creates.is_empty()
+        && args.external.is_empty()
+    {
+        return Err(syn::Error::new(
+            ident.span(),
+            "Action requires explicit reads(...), writes(...), creates(...), external(...) or pure",
+        ));
     }
-    let macro_args = match ActionArgs::from_list(&attr_args) {
-        Ok(value) => value,
-        Err(error) => return TokenStream::from(error.write_errors()),
-    };
-
-    let input_fn = parse_macro_input!(input as syn::ItemFn);
-    let fn_name = &input_fn.sig.ident;
-    let fn_name_str = fn_name.to_string();
-    let api_name_str = fn_name_str.clone();
-
-    let subject = match macro_args.subject.as_deref() {
-        Some(name) => quote!(Some(::tesela::__private::ApiName::new_unchecked(#name))),
-        None => quote!(None),
-    };
-
-    let risk = match macro_args.risk.as_deref().map_or("low", |value| value) {
-        "low" => quote!(::tesela::__private::RiskLevel::Low),
-        "medium" => quote!(::tesela::__private::RiskLevel::Medium),
-        "high" => quote!(::tesela::__private::RiskLevel::High),
-        other => {
-            return syn::Error::new_spanned(&input_fn, format!("unknown action risk '{other}'"))
-                .to_compile_error()
-                .into();
+    let output = args
+        .returns
+        .ok_or_else(|| syn::Error::new(ident.span(), "Action requires returns = Type"))?;
+    let output_schema_type = json_schema_type(&type_to_string(&output));
+    let fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(fields) => fields.named.iter().collect::<Vec<_>>(),
+            _ => {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "Action requires named fields",
+                ));
+            }
+        },
+        _ => {
+            return Err(syn::Error::new(
+                ident.span(),
+                "Action can only be derived for a struct",
+            ));
         }
     };
-
-    let effects = match macro_args.effects.as_deref() {
-        // An action that declares nothing is assumed to write: over-declaring a
-        // write costs an approval prompt, under-declaring one is a security bug.
-        None | Some("write") => quote!(::tesela::__private::ActionEffects::new()),
-        Some("read_only") => quote!(::tesela::__private::ActionEffects::read_only()),
-        Some("external") => quote!(::tesela::__private::ActionEffects {
-            reads: true,
-            writes: true,
-            external: true,
-            idempotent: false,
-        }),
-        Some(other) => {
-            return syn::Error::new_spanned(
-                &input_fn,
-                format!(
-                    "unknown action effects '{other}': expected \"read_only\", \"write\" or \"external\""
-                ),
-            )
-            .to_compile_error()
-            .into();
-        }
-    };
-    let effects = if macro_args.idempotent.is_present() {
-        quote!(::tesela::__private::ActionEffects { idempotent: true, ..#effects })
-    } else {
-        effects
-    };
-
-    let concurrency = match macro_args.concurrency.as_deref() {
-        None | Some("serial") => quote!(::tesela::__private::Concurrency::Serial),
-        Some("optimistic") => quote!(::tesela::__private::Concurrency::Optimistic),
-        Some("unrestricted") => quote!(::tesela::__private::Concurrency::Unrestricted),
-        Some(other) => {
-            return syn::Error::new_spanned(
-                &input_fn,
-                format!(
-                    "unknown action concurrency '{other}': expected \"serial\", \"optimistic\" or \"unrestricted\""
-                ),
-            )
-            .to_compile_error()
-            .into();
-        }
-    };
-
-    let display_name = macro_args.display.unwrap_or_else(|| fn_name_str.clone());
-    let description = macro_args.description.unwrap_or_default();
-
-    let params = &input_fn.sig.inputs;
-    let mut schema_props = Vec::new();
-    for param in params {
-        if let syn::FnArg::Typed(pt) = param
-            && let syn::Pat::Ident(pi) = pt.pat.as_ref()
-        {
-            let param_name = pi.ident.to_string();
-            let ty_str = type_to_string(&pt.ty);
-            let base_type = ty_str.trim_start_matches("Option<").trim_end_matches('>');
-            let dt_str = match base_type {
-                "String" | "&str" => "string",
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => "integer",
-                "f32" | "f64" => "number",
-                "bool" => "boolean",
-                _ => "string",
-            };
-            schema_props.push(quote! {
-                (#param_name.to_string(), ::tesela::__private::serde_json::json!({"type": #dt_str}))
-            });
+    let api_name = to_snake_case(&ident.to_string());
+    let subject = args.subject.map_or_else(
+        || quote!(None),
+        |value| quote!(Some(<#value as ::tesela::Object>::api_name())),
+    );
+    let reads = args
+        .reads
+        .iter()
+        .map(|value| quote!(<#value as ::tesela::Object>::api_name()));
+    let writes = args
+        .writes
+        .iter()
+        .map(|value| quote!(<#value as ::tesela::Object>::api_name()));
+    let creates = args
+        .creates
+        .iter()
+        .map(|value| quote!(<#value as ::tesela::Object>::api_name()));
+    let external = args
+        .external
+        .iter()
+        .map(|value| quote!(::tesela::__private::ApiName::new_unchecked(#value)));
+    let reads_effect = !args.reads.is_empty();
+    let writes_effect = !args.writes.is_empty() || !args.creates.is_empty();
+    let external_effect = !args.external.is_empty();
+    let idempotent = args.pure || args.idempotent;
+    let effects = quote!(::tesela::__private::ActionEffects { reads: #reads_effect, writes: #writes_effect, external: #external_effect, idempotent: #idempotent });
+    let concurrency = enum_value(
+        args.concurrency.as_ref(),
+        "concurrency",
+        &[
+            ("serial", "Serial"),
+            ("optimistic", "Optimistic"),
+            ("unrestricted", "Unrestricted"),
+        ],
+        "::tesela::__private::Concurrency",
+        "serial",
+    )?;
+    let approval = enum_value(
+        args.approval.as_ref(),
+        "approval",
+        &[
+            ("never", "Never"),
+            ("policy", "Policy"),
+            ("always", "Always"),
+        ],
+        "::tesela::__private::ApprovalPolicy",
+        "policy",
+    )?;
+    let risk = enum_value(
+        args.risk.as_ref(),
+        "risk",
+        &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
+        "::tesela::__private::RiskLevel",
+        "low",
+    )?;
+    let requires_revision = args.requires_revision;
+    let mut encoders = Vec::new();
+    let mut decoders = Vec::new();
+    let mut initializers = Vec::new();
+    let mut schema = Vec::new();
+    let mut required = Vec::new();
+    for field in fields {
+        let field_ident = field.ident.as_ref().expect("named field");
+        let field_name = field_ident.to_string();
+        let ty = &field.ty;
+        encoders.push(quote! { map.insert(#field_name.to_owned(), ::tesela::__private::serde_json::to_value(&self.#field_ident).map_err(|error| ::tesela::Error::bad_request(error.to_string()))?); });
+        decoders.push(quote! { let #field_ident: #ty = ::tesela::model::decode_value(values.remove(#field_name).map(::tesela::__private::Value::new), #field_name)?; });
+        initializers.push(quote!(#field_ident));
+        let schema_type = json_schema_type(&type_to_string(ty));
+        schema.push(quote! { properties.insert(#field_name.to_owned(), ::tesela::__private::serde_json::json!({"type": #schema_type})); });
+        if !is_option(&type_to_string(ty)) {
+            required.push(field_name.clone());
         }
     }
+    Ok(quote! {
+        impl ::tesela::Action for #ident {
+            type Output = #output;
+            fn definition() -> ::tesela::__private::ActionType {
+                let mut properties = ::tesela::__private::serde_json::Map::new(); #(#schema)*
+                ::tesela::__private::ActionType { api_name: ::tesela::__private::ApiName::new_unchecked(#api_name), display: None, description: None, subject: #subject, input_schema: Some(::tesela::__private::Value::new(::tesela::__private::serde_json::json!({"type":"object","properties":properties,"required":[#(#required),*]}))), output_schema: Some(::tesela::__private::Value::new(::tesela::__private::serde_json::json!({"type": #output_schema_type}))), risk_level: #risk, effects: #effects, reads: vec![#(#reads),*], writes: vec![#(#writes),*], creates: vec![#(#creates),*], external_effects: vec![#(#external),*], approval: #approval, requires_revision: #requires_revision, preconditions: Vec::new(), concurrency: #concurrency, idempotency_key: None, deprecated_at: None }
+            }
+            fn encode(&self) -> Result<::tesela::__private::Value, ::tesela::Error> { let mut map = ::tesela::__private::serde_json::Map::new(); #(#encoders)* Ok(::tesela::__private::Value::new(map.into())) }
+            fn decode_input(value: ::tesela::__private::Value) -> Result<Self, ::tesela::Error> { let mut values = value.0.as_object().cloned().ok_or_else(|| ::tesela::Error::bad_request("action input must be an object"))?; #(#decoders)* Ok(Self { #(#initializers),* }) }
+            fn decode(value: Option<::tesela::__private::Value>) -> Result<Self::Output, ::tesela::Error> { let value = value.ok_or_else(|| ::tesela::Error::adapter("action returned no output"))?; ::tesela::__private::serde_json::from_value(value.into()).map_err(|error| ::tesela::Error::adapter(error.to_string())) }
+            fn encode_output(value: &Self::Output) -> Result<::tesela::__private::Value, ::tesela::Error> { ::tesela::__private::serde_json::to_value(value).map(::tesela::__private::Value::new).map_err(|error| ::tesela::Error::adapter(error.to_string())) }
+        }
+    })
+}
 
-    let action_struct_name = format_ident!("{}Action", to_pascal_case(&fn_name_str));
-
-    let expanded = quote! {
-        #input_fn
-
-        /// Generated action type accessor.
-        pub struct #action_struct_name;
-
-        impl #action_struct_name {
-            /// Return the Tesela `ActionType` definition for this action.
-            pub fn tesela_action_type() -> ::tesela::__private::ActionType {
-                let props: std::collections::HashMap<String, ::tesela::__private::serde_json::Value> =
-                    vec![ #(#schema_props),* ].into_iter().collect();
-                ::tesela::__private::ActionType {
-                    api_name: ::tesela::__private::ApiName::new_unchecked(#api_name_str),
-                    display: Some(#display_name.to_string()),
-                    description: if #description.is_empty() { None } else { Some(#description.to_string()) },
-                    subject: #subject,
-                    input_schema: if props.is_empty() {
-                        None
-                    } else {
-                        Some(::tesela::__private::Value::new(::tesela::__private::serde_json::json!({
-                            "type": "object",
-                            "properties": props,
-                        })))
-                    },
-                    output_schema: None,
-                    risk_level: #risk,
-                    effects: #effects,
-                    reads: Vec::new(),
-                    writes: Vec::new(),
-                    creates: Vec::new(),
-                    external_effects: Vec::new(),
-                    approval: ::tesela::__private::ApprovalPolicy::Policy,
-                    requires_revision: false,
-                    preconditions: Vec::new(),
-                    concurrency: #concurrency,
-                    idempotency_key: None,
-                    deprecated_at: None,
+fn parse_args(input: &DeriveInput) -> syn::Result<Args> {
+    let mut args = Args::default();
+    for attr in tesela_attrs(&input.attrs) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("subject") {
+                args.subject = Some(meta.value()?.parse()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("returns") {
+                args.returns = Some(meta.value()?.parse()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("pure") {
+                args.pure = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("idempotent") {
+                args.idempotent = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("requires_revision") {
+                args.requires_revision = true;
+                return Ok(());
+            }
+            for (name, value) in [
+                ("concurrency", &mut args.concurrency),
+                ("approval", &mut args.approval),
+                ("risk", &mut args.risk),
+            ] {
+                if meta.path.is_ident(name) {
+                    *value = Some(meta.value()?.parse()?);
+                    return Ok(());
                 }
             }
-        }
-    };
-
-    TokenStream::from(expanded)
+            for (name, values) in [
+                ("reads", &mut args.reads),
+                ("writes", &mut args.writes),
+                ("creates", &mut args.creates),
+            ] {
+                if meta.path.is_ident(name) {
+                    meta.parse_nested_meta(|inner| {
+                        values.push(Type::Path(syn::TypePath {
+                            qself: None,
+                            path: inner.path.clone(),
+                        }));
+                        Ok(())
+                    })?;
+                    return Ok(());
+                }
+            }
+            if meta.path.is_ident("external") {
+                meta.parse_nested_meta(|inner| {
+                    let name = inner
+                        .path
+                        .get_ident()
+                        .ok_or_else(|| inner.error("external effects must be identifiers"))?;
+                    args.external.push(name.to_string());
+                    Ok(())
+                })?;
+                return Ok(());
+            }
+            Err(unsupported_attr(&meta, "Action"))
+        })?;
+    }
+    Ok(args)
 }
 
-/// Arguments this macro used to accept, and why it no longer does.
-///
-/// `handler` in particular named a callback the macro never wired up: the
-/// declaration claimed a binding that only the host can make.
-fn reject_removed(args: &[darling::ast::NestedMeta]) -> Option<syn::Error> {
-    for arg in args {
-        let darling::ast::NestedMeta::Meta(meta) = arg else {
-            continue;
-        };
-        let Some(ident) = meta.path().get_ident() else {
-            continue;
-        };
-        let reason = match ident.to_string().as_str() {
-            "handler" | "handler_kind" => {
-                "an action no longer declares a handler: `ActionType` says what the action is and what it may touch, and the host binds an executor to it at runtime"
-            }
-            "mode" => {
-                "an action no longer carries a mode: use `effects` to say what it reads and writes, and `concurrency` to say what the host must guarantee"
-            }
-            _ => continue,
-        };
-        return Some(syn::Error::new(ident.span(), reason));
-    }
-    None
+fn enum_value(
+    value: Option<&Ident>,
+    name: &str,
+    allowed: &[(&str, &str)],
+    path: &str,
+    default: &str,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let selected = value.map_or_else(|| default.to_owned(), ToString::to_string);
+    let variant = allowed
+        .iter()
+        .find_map(|(input, variant)| (*input == selected).then_some(*variant))
+        .ok_or_else(|| {
+            syn::Error::new(
+                value.expect("invalid value exists").span(),
+                format!(
+                    "invalid {name}; expected {}",
+                    allowed
+                        .iter()
+                        .map(|item| item.0)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        })?;
+    let path: syn::Path = syn::parse_str(path).expect("static enum path");
+    let variant = Ident::new(variant, proc_macro2::Span::call_site());
+    Ok(quote!(#path::#variant))
 }
 
-/// Convert a `snake_case` identifier to `PascalCase`.
-fn to_pascal_case(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut capitalize = true;
-    for ch in value.chars() {
-        if ch == '_' {
-            capitalize = true;
-        } else if capitalize {
-            out.push(ch.to_ascii_uppercase());
-            capitalize = false;
-        } else {
-            out.push(ch);
-        }
+fn json_schema_type(ty: &str) -> &'static str {
+    let ty = ty
+        .strip_prefix("Option<")
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(ty);
+    if ty == "bool" {
+        "boolean"
+    } else if matches!(
+        ty,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize"
+    ) {
+        "integer"
+    } else if matches!(ty, "f32" | "f64") {
+        "number"
+    } else if ty.starts_with("Vec<") || ty.starts_with('[') {
+        "array"
+    } else if ty == "serde_json::Value" || ty == "Value" {
+        "object"
+    } else {
+        "string"
     }
-    out
 }

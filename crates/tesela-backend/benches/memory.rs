@@ -23,7 +23,7 @@ use tesela_backend::{
     AggregateQuery, Aggregation, AggregationFunction, Backend, MemoryBackend, Query, Sort,
     SortDirection,
 };
-use tesela_core::{ApiName, Error, FilterOp, Key, Value};
+use tesela_core::{ApiName, Error, ExecutionContext, FilterOp, Key, Principal, Value};
 use tesela_ir::Filter;
 
 /// The two cardinalities every query shape is measured at.
@@ -36,6 +36,10 @@ fn name(value: &str) -> ApiName {
     ApiName::new_unchecked(value)
 }
 
+fn context() -> ExecutionContext {
+    ExecutionContext::trusted(Principal::new("benchmark"), "benchmark").expect("context")
+}
+
 fn tenant(index: usize) -> String {
     format!("tenant_{:02}", index % TENANTS)
 }
@@ -46,6 +50,7 @@ fn customer_key(index: usize) -> Key {
 
 fn build_backend(rows: usize) -> Result<Arc<MemoryBackend>, Error> {
     let backend = MemoryBackend::new();
+    let context = context();
     let object_type = name("customer");
     for index in 0..rows {
         let mut values = BTreeMap::new();
@@ -60,7 +65,7 @@ fn build_backend(rows: usize) -> Result<Arc<MemoryBackend>, Error> {
             name("region"),
             Value::string(format!("region_{:02}", index % REGIONS)),
         );
-        backend.create(&object_type, customer_key(index), values)?;
+        backend.create(&context, &object_type, customer_key(index), values)?;
     }
     Ok(backend)
 }
@@ -88,7 +93,7 @@ fn search_cases(rows: usize) -> Vec<(&'static str, Query)> {
         .map(|index| Value::string(format!("customer_{index:06}")))
         .collect();
     vec![
-        // Unfiltered page: the backend materialises every row before paging.
+        // Unfiltered page: bounded execution stops after limit + 1 rows.
         ("no_filter_limit_100", page(100)),
         (
             "eq_filter_limit_100",
@@ -117,7 +122,7 @@ fn search_cases(rows: usize) -> Vec<(&'static str, Query)> {
                 ..page(100)
             },
         ),
-        // Sorting on an unindexed property means ordering every match.
+        // Sorting on an unindexed property scans every match but retains only top-k.
         (
             "sorted_limit_100",
             Query {
@@ -141,6 +146,7 @@ fn search_cases(rows: usize) -> Vec<(&'static str, Query)> {
 
 fn bench_search(criterion: &mut Criterion) -> Result<(), Error> {
     let customer = name("customer");
+    let context = context();
     let mut group = criterion.benchmark_group("memory_search");
     group.sample_size(30);
 
@@ -148,7 +154,9 @@ fn bench_search(criterion: &mut Criterion) -> Result<(), Error> {
         let backend = build_backend(rows)?;
         for (label, query) in search_cases(rows) {
             group.bench_with_input(BenchmarkId::new(label, rows), &query, |bencher, query| {
-                bencher.iter(|| backend.search(black_box(&customer), black_box(query)));
+                bencher.iter(|| {
+                    backend.search(black_box(&context), black_box(&customer), black_box(query))
+                });
             });
         }
     }
@@ -158,7 +166,7 @@ fn bench_search(criterion: &mut Criterion) -> Result<(), Error> {
     let backend = build_backend(SIZES[0])?;
     let last = customer_key(SIZES[0] - 1);
     group.bench_function("get_by_primary_key", |bencher| {
-        bencher.iter(|| backend.get(black_box(&customer), black_box(&last)))
+        bencher.iter(|| backend.get(black_box(&context), black_box(&customer), black_box(&last)))
     });
 
     group.finish();
@@ -203,6 +211,7 @@ fn aggregate_cases() -> Vec<(&'static str, AggregateQuery)> {
 
 fn bench_aggregate(criterion: &mut Criterion) -> Result<(), Error> {
     let customer = name("customer");
+    let context = context();
     let mut group = criterion.benchmark_group("memory_aggregate");
     group.sample_size(30);
 
@@ -210,7 +219,9 @@ fn bench_aggregate(criterion: &mut Criterion) -> Result<(), Error> {
         let backend = build_backend(rows)?;
         for (label, query) in aggregate_cases() {
             group.bench_with_input(BenchmarkId::new(label, rows), &query, |bencher, query| {
-                bencher.iter(|| backend.aggregate(black_box(&customer), black_box(query)));
+                bencher.iter(|| {
+                    backend.aggregate(black_box(&context), black_box(&customer), black_box(query))
+                });
             });
         }
     }

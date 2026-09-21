@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use tesela_core::{ApiName, Error, Key, Value};
+use tesela_core::{ApiName, Error, ExecutionContext, Key, Principal, Value};
 
 use crate::{Backend, Mutation, Query, Sort, SortDirection};
 
@@ -20,14 +20,15 @@ pub struct ConformanceFixture {
 /// Exercise advertised operations, read consistency, revisions, conflicts,
 /// atomic primitives, and cleanup against an isolated backend instance.
 pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(), Error> {
+    let context = ExecutionContext::trusted(Principal::new("conformance"), "conformance")?;
     let capabilities = backend.capabilities();
     if capabilities.create {
         for (key, values) in &fixture.records {
-            backend.create(&fixture.object, key.clone(), values.clone())?;
+            backend.create(&context, &fixture.object, key.clone(), values.clone())?;
         }
         let (key, values) = &fixture.records[0];
         if backend
-            .create(&fixture.object, key.clone(), values.clone())
+            .create(&context, &fixture.object, key.clone(), values.clone())
             .is_ok()
         {
             return Err(Error::internal("duplicate create did not conflict"));
@@ -36,7 +37,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
     if capabilities.get {
         for (key, _) in &fixture.records {
             let record = backend
-                .get(&fixture.object, key)?
+                .get(&context, &fixture.object, key)?
                 .ok_or_else(|| Error::internal("created record was not readable"))?;
             if &record.primary_key != key {
                 return Err(Error::internal("get returned the wrong primary key"));
@@ -45,6 +46,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
     }
     if capabilities.search {
         let page = backend.search(
+            &context,
             &fixture.object,
             &Query {
                 limit: Some(1),
@@ -57,6 +59,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
             ));
         }
         let next = backend.search(
+            &context,
             &fixture.object,
             &Query {
                 limit: Some(1),
@@ -69,6 +72,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
         }
         let first = &fixture.records[0];
         let filtered = backend.search(
+            &context,
             &fixture.object,
             &Query {
                 filter: Some(tesela_ir::Filter::eq(
@@ -84,6 +88,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
             ));
         }
         let ordered = backend.search(
+            &context,
             &fixture.object,
             &Query {
                 sort: vec![Sort {
@@ -102,15 +107,27 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
     if capabilities.update && capabilities.get {
         let (key, _) = &fixture.records[0];
         let original = backend
-            .get(&fixture.object, key)?
+            .get(&context, &fixture.object, key)?
             .ok_or_else(|| Error::internal("fixture disappeared"))?;
         let revision = original
             .revision
             .clone()
             .ok_or_else(|| Error::internal("mutation backend did not assign a revision"))?;
-        backend.update(&fixture.object, key, BTreeMap::new(), Some(&revision))?;
+        backend.update(
+            &context,
+            &fixture.object,
+            key,
+            BTreeMap::new(),
+            Some(&revision),
+        )?;
         if backend
-            .update(&fixture.object, key, BTreeMap::new(), Some(&revision))
+            .update(
+                &context,
+                &fixture.object,
+                key,
+                BTreeMap::new(),
+                Some(&revision),
+            )
             .is_ok()
         {
             return Err(Error::internal("stale revision was accepted"));
@@ -118,10 +135,10 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
     }
     if capabilities.upsert {
         let (key, values) = &fixture.records[0];
-        backend.upsert(&fixture.object, key.clone(), values.clone(), None)?;
+        backend.upsert(&context, &fixture.object, key.clone(), values.clone(), None)?;
     }
     if capabilities.batch {
-        let result = backend.batch(&fixture.object, &fixture.primary_key, &[])?;
+        let result = backend.batch(&context, &fixture.object, &fixture.primary_key, &[])?;
         if result.rows_affected != Some(0) {
             return Err(Error::internal("empty batch was not atomic no-op"));
         }
@@ -131,6 +148,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
             let third_values = BTreeMap::from([(fixture.primary_key.clone(), third_value)]);
             let duplicate = &fixture.records[0];
             let failed = backend.batch(
+                &context,
                 &fixture.object,
                 &fixture.primary_key,
                 &[
@@ -142,7 +160,11 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
                     },
                 ],
             );
-            if failed.is_ok() || backend.get(&fixture.object, &third_key)?.is_some() {
+            if failed.is_ok()
+                || backend
+                    .get(&context, &fixture.object, &third_key)?
+                    .is_some()
+            {
                 return Err(Error::internal("failed batch was not atomic"));
             }
         }
@@ -152,7 +174,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
             let handles: Vec<_> = fixture
                 .records
                 .iter()
-                .map(|(key, _)| scope.spawn(move || backend.get(&fixture.object, key)))
+                .map(|(key, _)| scope.spawn(|| backend.get(&context, &fixture.object, key)))
                 .collect();
             for handle in handles {
                 handle
@@ -164,7 +186,7 @@ pub fn verify(backend: &dyn Backend, fixture: &ConformanceFixture) -> Result<(),
     }
     if capabilities.delete {
         for (key, _) in &fixture.records {
-            backend.delete(&fixture.object, key, None)?;
+            backend.delete(&context, &fixture.object, key, None)?;
         }
     }
     backend.close()

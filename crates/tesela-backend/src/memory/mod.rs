@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use tesela_core::{ApiName, Error, Key, Value, lock_read, lock_write};
+use tesela_core::{ApiName, Error, ExecutionContext, Key, Value, lock_read, lock_write};
 use tesela_ir::{AggregateResult, MutationResult, Page, Record, Revision};
 
 use crate::{
@@ -87,7 +87,12 @@ impl Backend for MemoryBackend {
         }
     }
 
-    fn search(&self, object_type: &ApiName, query: &Query) -> Result<Page, Error> {
+    fn search(
+        &self,
+        _context: &ExecutionContext,
+        object_type: &ApiName,
+        query: &Query,
+    ) -> Result<Page, Error> {
         let records = lock_read(&self.records)?;
         let Some(records_for_type) = records.get(object_type) else {
             return Ok(Page::default());
@@ -95,7 +100,12 @@ impl Backend for MemoryBackend {
         execute_residual(records_for_type.values(), query)
     }
 
-    fn get(&self, object_type: &ApiName, primary_key: &Key) -> Result<Option<Record>, Error> {
+    fn get(
+        &self,
+        _context: &ExecutionContext,
+        object_type: &ApiName,
+        primary_key: &Key,
+    ) -> Result<Option<Record>, Error> {
         Ok(lock_read(&self.records)?
             .get(object_type)
             .and_then(|records_for_type| records_for_type.get(primary_key))
@@ -104,6 +114,7 @@ impl Backend for MemoryBackend {
 
     fn create(
         &self,
+        _context: &ExecutionContext,
         object_type: &ApiName,
         primary_key: Key,
         values: BTreeMap<ApiName, Value>,
@@ -126,6 +137,7 @@ impl Backend for MemoryBackend {
 
     fn update(
         &self,
+        _context: &ExecutionContext,
         object_type: &ApiName,
         primary_key: &Key,
         values: BTreeMap<ApiName, Value>,
@@ -149,6 +161,7 @@ impl Backend for MemoryBackend {
 
     fn delete(
         &self,
+        _context: &ExecutionContext,
         object_type: &ApiName,
         primary_key: &Key,
         expected_revision: Option<&Revision>,
@@ -167,6 +180,7 @@ impl Backend for MemoryBackend {
 
     fn upsert(
         &self,
+        _context: &ExecutionContext,
         object_type: &ApiName,
         primary_key: Key,
         values: BTreeMap<ApiName, Value>,
@@ -192,6 +206,7 @@ impl Backend for MemoryBackend {
 
     fn batch(
         &self,
+        _context: &ExecutionContext,
         object_type: &ApiName,
         primary_key: &ApiName,
         mutations: &[Mutation],
@@ -212,10 +227,12 @@ impl Backend for MemoryBackend {
 
     fn aggregate(
         &self,
+        context: &ExecutionContext,
         object_type: &ApiName,
         query: &AggregateQuery,
     ) -> Result<AggregateResult, Error> {
         let page = self.search(
+            context,
             object_type,
             &Query {
                 filter: query.filter.clone(),
@@ -234,6 +251,7 @@ impl Backend for MemoryBackend {
 impl LinkResolver for MemoryBackend {
     fn linked_keys(
         &self,
+        _context: &ExecutionContext,
         link: &ApiName,
         target: &ApiName,
         source_key: &Key,

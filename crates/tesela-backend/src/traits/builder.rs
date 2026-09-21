@@ -34,7 +34,10 @@ impl BackendBuilder {
     #[must_use]
     pub fn search(
         mut self,
-        handler: impl Fn(&ApiName, &Query) -> Result<Page, Error> + Send + Sync + 'static,
+        handler: impl Fn(&ExecutionContext, &ApiName, &Query) -> Result<Page, Error>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.search = Some(Arc::new(handler));
         self
@@ -43,7 +46,10 @@ impl BackendBuilder {
     #[must_use]
     pub fn get(
         mut self,
-        handler: impl Fn(&ApiName, &Key) -> Result<Option<Record>, Error> + Send + Sync + 'static,
+        handler: impl Fn(&ExecutionContext, &ApiName, &Key) -> Result<Option<Record>, Error>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.get = Some(Arc::new(handler));
         self
@@ -52,7 +58,12 @@ impl BackendBuilder {
     #[must_use]
     pub fn create(
         mut self,
-        handler: impl Fn(&ApiName, Key, BTreeMap<ApiName, Value>) -> Result<MutationResult, Error>
+        handler: impl Fn(
+            &ExecutionContext,
+            &ApiName,
+            Key,
+            BTreeMap<ApiName, Value>,
+        ) -> Result<MutationResult, Error>
         + Send
         + Sync
         + 'static,
@@ -65,6 +76,7 @@ impl BackendBuilder {
     pub fn update(
         mut self,
         handler: impl Fn(
+            &ExecutionContext,
             &ApiName,
             &Key,
             BTreeMap<ApiName, Value>,
@@ -81,7 +93,12 @@ impl BackendBuilder {
     #[must_use]
     pub fn delete(
         mut self,
-        handler: impl Fn(&ApiName, &Key, Option<&Revision>) -> Result<MutationResult, Error>
+        handler: impl Fn(
+            &ExecutionContext,
+            &ApiName,
+            &Key,
+            Option<&Revision>,
+        ) -> Result<MutationResult, Error>
         + Send
         + Sync
         + 'static,
@@ -94,6 +111,7 @@ impl BackendBuilder {
     pub fn upsert(
         mut self,
         handler: impl Fn(
+            &ExecutionContext,
             &ApiName,
             Key,
             BTreeMap<ApiName, Value>,
@@ -110,7 +128,12 @@ impl BackendBuilder {
     #[must_use]
     pub fn batch(
         mut self,
-        handler: impl Fn(&ApiName, &ApiName, &[Mutation]) -> Result<MutationResult, Error>
+        handler: impl Fn(
+            &ExecutionContext,
+            &ApiName,
+            &ApiName,
+            &[Mutation],
+        ) -> Result<MutationResult, Error>
         + Send
         + Sync
         + 'static,
@@ -122,7 +145,7 @@ impl BackendBuilder {
     #[must_use]
     pub fn aggregate(
         mut self,
-        handler: impl Fn(&ApiName, &AggregateQuery) -> Result<AggregateResult, Error>
+        handler: impl Fn(&ExecutionContext, &ApiName, &AggregateQuery) -> Result<AggregateResult, Error>
         + Send
         + Sync
         + 'static,
@@ -155,26 +178,38 @@ impl Backend for BackendBuilder {
                 || self.upsert.is_some(),
         }
     }
-    fn search(&self, object: &ApiName, query: &Query) -> Result<Page, Error> {
+    fn search(
+        &self,
+        context: &ExecutionContext,
+        object: &ApiName,
+        query: &Query,
+    ) -> Result<Page, Error> {
         self.search
             .as_ref()
-            .ok_or_else(|| Error::unsupported("search"))?(object, query)
+            .ok_or_else(|| Error::unsupported("search"))?(context, object, query)
     }
-    fn get(&self, object: &ApiName, key: &Key) -> Result<Option<Record>, Error> {
-        self.get.as_ref().ok_or_else(|| Error::unsupported("get"))?(object, key)
+    fn get(
+        &self,
+        context: &ExecutionContext,
+        object: &ApiName,
+        key: &Key,
+    ) -> Result<Option<Record>, Error> {
+        self.get.as_ref().ok_or_else(|| Error::unsupported("get"))?(context, object, key)
     }
     fn create(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: Key,
         values: BTreeMap<ApiName, Value>,
     ) -> Result<MutationResult, Error> {
         self.create
             .as_ref()
-            .ok_or_else(|| Error::unsupported("create"))?(object, key, values)
+            .ok_or_else(|| Error::unsupported("create"))?(context, object, key, values)
     }
     fn update(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: &Key,
         values: BTreeMap<ApiName, Value>,
@@ -182,20 +217,24 @@ impl Backend for BackendBuilder {
     ) -> Result<MutationResult, Error> {
         self.update
             .as_ref()
-            .ok_or_else(|| Error::unsupported("update"))?(object, key, values, expected)
+            .ok_or_else(|| Error::unsupported("update"))?(
+            context, object, key, values, expected
+        )
     }
     fn delete(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: &Key,
         expected: Option<&Revision>,
     ) -> Result<MutationResult, Error> {
         self.delete
             .as_ref()
-            .ok_or_else(|| Error::unsupported("delete"))?(object, key, expected)
+            .ok_or_else(|| Error::unsupported("delete"))?(context, object, key, expected)
     }
     fn upsert(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         key: Key,
         values: BTreeMap<ApiName, Value>,
@@ -204,11 +243,12 @@ impl Backend for BackendBuilder {
         self.upsert
             .as_ref()
             .ok_or_else(|| Error::unsupported("atomic upsert"))?(
-            object, key, values, expected
+            context, object, key, values, expected,
         )
     }
     fn batch(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         primary_key: &ApiName,
         mutations: &[Mutation],
@@ -216,17 +256,21 @@ impl Backend for BackendBuilder {
         self.batch
             .as_ref()
             .ok_or_else(|| Error::unsupported("atomic batch"))?(
-            object, primary_key, mutations
+            context,
+            object,
+            primary_key,
+            mutations,
         )
     }
     fn aggregate(
         &self,
+        context: &ExecutionContext,
         object: &ApiName,
         query: &AggregateQuery,
     ) -> Result<AggregateResult, Error> {
         self.aggregate
             .as_ref()
-            .ok_or_else(|| Error::unsupported("aggregate"))?(object, query)
+            .ok_or_else(|| Error::unsupported("aggregate"))?(context, object, query)
     }
 }
 

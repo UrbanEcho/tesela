@@ -187,6 +187,11 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Start an explicit context builder for one principal.
+    #[must_use]
+    pub fn builder(principal: impl AsRef<str>) -> ExecutionContextBuilder {
+        ExecutionContextBuilder::new(principal)
+    }
     /// Build and validate an execution context.
     pub fn new(
         principal: Principal,
@@ -196,6 +201,9 @@ impl ExecutionContext {
         cancellation: CancellationToken,
         budget: ExecutionBudget,
     ) -> Result<Self, Error> {
+        if principal.id.is_empty() {
+            return Err(Error::validation("principal must not be empty"));
+        }
         if request_id.as_ref().is_empty() {
             return Err(Error::validation("request_id must not be empty"));
         }
@@ -247,6 +255,26 @@ impl ExecutionContext {
     #[must_use]
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+    /// Delegated authority chain supplied by the host.
+    #[must_use]
+    pub fn authority(&self) -> &[AuthorityGrant] {
+        &self.authority
+    }
+    /// Explicitly approved semantic resources.
+    #[must_use]
+    pub fn approvals(&self) -> &[ApiName] {
+        &self.approvals
+    }
+    /// Immutable resource limits for this execution.
+    #[must_use]
+    pub const fn budget(&self) -> &ExecutionBudget {
+        &self.budget
+    }
+    /// Whether cancellation has been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
     }
     /// Add explicit host approvals before execution begins.
     #[must_use]
@@ -352,134 +380,88 @@ impl ExecutionContext {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Builder for an immutable execution context.
+pub struct ExecutionContextBuilder {
+    principal: Principal,
+    authority: Vec<AuthorityGrant>,
+    approvals: Vec<ApiName>,
+    request_id: Option<String>,
+    deadline: Option<Instant>,
+    cancellation: CancellationToken,
+    budget: ExecutionBudget,
+}
 
-    #[test]
-    fn budgets_fail_before_overcharging() {
-        let context = ExecutionContext::new(
-            Principal::new("agent"),
-            Vec::new(),
-            "request",
-            None,
-            CancellationToken::default(),
-            ExecutionBudget {
-                rows: Some(2),
-                ..ExecutionBudget::default()
-            },
-        )
-        .expect("context");
-        assert!(context.charge_rows(2).is_ok());
-        assert!(context.charge_rows(1).is_err());
+impl ExecutionContextBuilder {
+    fn new(principal: impl AsRef<str>) -> Self {
+        Self {
+            principal: Principal::new(principal),
+            authority: Vec::new(),
+            approvals: Vec::new(),
+            request_id: None,
+            deadline: None,
+            cancellation: CancellationToken::default(),
+            budget: ExecutionBudget::default(),
+        }
     }
-
-    #[test]
-    fn delegation_must_attenuate_and_end_at_the_principal() {
-        let resource = ApiName::new_unchecked("customer");
-        let root = AuthorityGrant {
-            issuer: Arc::from("host"),
-            delegate: Arc::from("broker"),
-            scopes: Arc::from([AuthorityScope {
-                operation: Operation::Read,
-                resource: None,
-            }]),
-            expires_at_unix_ms: None,
-            max_calls: Some(4),
-            delegation_depth: 2,
-        };
-        let child = AuthorityGrant {
-            issuer: Arc::from("broker"),
-            delegate: Arc::from("agent"),
-            scopes: Arc::from([AuthorityScope {
-                operation: Operation::Read,
-                resource: Some(resource.clone()),
-            }]),
-            expires_at_unix_ms: None,
-            max_calls: Some(2),
-            delegation_depth: 1,
-        };
-        let context = ExecutionContext::new(
-            Principal::new("agent"),
-            vec![root.clone(), child],
-            "request",
-            None,
-            CancellationToken::default(),
-            ExecutionBudget::default(),
-        )
-        .expect("valid chain");
-        assert!(context.check(Operation::Read, &resource).is_ok());
-        let expanded = AuthorityGrant {
-            max_calls: Some(5),
-            ..root.clone()
-        };
-        assert!(root.validate_child(&expanded).is_err());
-        assert!(
-            ExecutionContext::new(
-                Principal::new("other"),
-                vec![root],
-                "request",
-                None,
-                CancellationToken::default(),
-                ExecutionBudget::default()
-            )
-            .is_err()
-        );
+    /// Add a principal claim.
+    #[must_use]
+    pub fn claim(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.principal.claims.insert(name.into(), value.into());
+        self
     }
-
-    #[test]
-    fn cancellation_and_deadlines_fail_before_authorization() {
-        let token = CancellationToken::default();
-        token.cancel();
-        let cancelled = ExecutionContext::new(
-            Principal::new("agent"),
-            Vec::new(),
-            "cancelled",
-            None,
-            token,
-            ExecutionBudget::default(),
-        )
-        .expect("context");
-        assert!(
-            cancelled
-                .check(Operation::Read, &ApiName::from("customer"))
-                .is_err_and(|error| error.is(crate::ErrorCode::Cancelled))
-        );
-
-        let expired = ExecutionContext::new(
-            Principal::new("agent"),
-            Vec::new(),
-            "expired",
-            Some(Instant::now() - Duration::from_millis(1)),
-            CancellationToken::default(),
-            ExecutionBudget::default(),
-        )
-        .expect("context");
-        assert!(
-            expired
-                .check(Operation::Read, &ApiName::from("customer"))
-                .is_err_and(|error| error.is(crate::ErrorCode::Timeout))
-        );
+    /// Set the request identifier.
+    #[must_use]
+    pub fn request_id(mut self, value: impl Into<String>) -> Self {
+        self.request_id = Some(value.into());
+        self
     }
-
-    #[test]
-    fn byte_and_external_cost_budgets_are_bounded() {
-        let context = ExecutionContext::new(
-            Principal::new("agent"),
-            Vec::new(),
-            "cost",
-            None,
-            CancellationToken::default(),
-            ExecutionBudget {
-                bytes: Some(8),
-                external_cost: Some(2),
-                ..ExecutionBudget::default()
-            },
+    /// Set delegated authority.
+    #[must_use]
+    pub fn authority(mut self, value: Vec<AuthorityGrant>) -> Self {
+        self.authority = value;
+        self
+    }
+    /// Add an approved semantic resource.
+    #[must_use]
+    pub fn approve(mut self, value: impl Into<ApiName>) -> Self {
+        self.approvals.push(value.into());
+        self
+    }
+    /// Set an absolute monotonic deadline.
+    #[must_use]
+    pub fn deadline(mut self, value: Instant) -> Self {
+        self.deadline = Some(value);
+        self
+    }
+    /// Set the shared cancellation handle.
+    #[must_use]
+    pub fn cancellation(mut self, value: CancellationToken) -> Self {
+        self.cancellation = value;
+        self
+    }
+    /// Set execution resource limits.
+    #[must_use]
+    pub fn budget(mut self, value: ExecutionBudget) -> Self {
+        self.budget = value;
+        self
+    }
+    /// Validate and freeze the context.
+    pub fn build(self) -> Result<ExecutionContext, Error> {
+        let request_id = self
+            .request_id
+            .ok_or_else(|| Error::validation("request_id is required"))?;
+        ExecutionContext::new(
+            self.principal,
+            self.authority,
+            request_id,
+            self.deadline,
+            self.cancellation,
+            self.budget,
         )
-        .expect("context");
-        assert!(context.charge_bytes(8).is_ok());
-        assert!(context.charge_bytes(1).is_err());
-        assert!(context.charge_external_cost(2).is_ok());
-        assert!(context.charge_external_cost(1).is_err());
+        .map(|context| context.with_approvals(self.approvals))
     }
 }
+
+#[cfg(test)]
+#[path = "execution_tests.rs"]
+mod tests;

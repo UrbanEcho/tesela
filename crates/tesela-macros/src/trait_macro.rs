@@ -1,121 +1,128 @@
 //! `#[derive(TraitDef)]` derive macro implementation.
 
-use crate::helpers::{is_option, rust_type_to_data_type, to_snake_case, type_to_string};
-use darling::FromAttributes;
+use crate::helpers::{
+    is_option, parse_field_args, rust_type_to_data_type, string_value, tesela_attrs, to_snake_case,
+    type_to_string, unsupported_attr,
+};
 use proc_macro::TokenStream;
-use proc_macro2::Span;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DeriveInput, parse_macro_input};
+use syn::spanned::Spanned;
+use syn::{DeriveInput, LitStr, parse_macro_input};
 
-#[derive(Debug, Default, FromAttributes)]
-#[darling(attributes(tesela))]
+#[derive(Debug, Default)]
 struct TraitArgs {
-    #[darling(default)]
-    display: Option<String>,
-}
-
-#[derive(Debug, Default, FromAttributes)]
-#[darling(attributes(tesela))]
-struct TraitFieldArgs {
-    #[darling(default)]
-    description: Option<String>,
-    #[darling(default)]
-    nullable: darling::util::Flag,
+    api_name: Option<String>,
+    display: Option<LitStr>,
+    description: Option<LitStr>,
 }
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let struct_name = &input.ident;
-    let struct_name_str = struct_name.to_string();
-    let api_name_str = to_snake_case(&struct_name_str);
+    match expand_checked(input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
 
-    let macro_args = match TraitArgs::from_attributes(&input.attrs) {
-        Ok(value) => value,
-        Err(error) => return error.write_errors().into(),
+fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
+    let struct_name = &input.ident;
+    let fallback_api_name = to_snake_case(&struct_name.to_string());
+    let args = parse_trait_args(&input)?;
+    let api_name = args.api_name.unwrap_or(fallback_api_name);
+    let display = match args.display {
+        Some(value) => quote!(Some(#value.to_string())),
+        None => quote!(None),
     };
-    let display_name = match macro_args.display {
-        Some(value) => value,
-        None => struct_name_str,
+    let description = match args.description {
+        Some(value) => quote!(Some(#value.to_string())),
+        None => quote!(None),
     };
 
     let fields = match &input.data {
-        syn::Data::Struct(ds) => match &ds.fields {
+        syn::Data::Struct(data) => match &data.fields {
             syn::Fields::Named(named) => named.named.iter().collect::<Vec<_>>(),
             _ => {
-                return syn::Error::new(
-                    Span::call_site(),
+                return Err(syn::Error::new(
+                    struct_name.span(),
                     "TraitDef requires a struct with named fields",
-                )
-                .to_compile_error()
-                .into();
+                ));
             }
         },
         _ => {
-            return syn::Error::new(Span::call_site(), "TraitDef can only be applied to structs")
-                .to_compile_error()
-                .into();
+            return Err(syn::Error::new(
+                struct_name.span(),
+                "TraitDef can only be applied to structs",
+            ));
         }
     };
 
-    let mut property_builders = Vec::new();
-
-    for field in &fields {
-        let field_name = match &field.ident {
-            Some(ident) => ident.to_string(),
-            None => {
-                return syn::Error::new(Span::call_site(), "TraitDef requires named fields")
-                    .to_compile_error()
-                    .into();
-            }
-        };
+    let mut property_builders = Vec::with_capacity(fields.len());
+    for field in fields {
+        let field_name = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "TraitDef requires named fields"))?
+            .to_string();
         let ty_str = type_to_string(&field.ty);
-        let is_opt = is_option(&ty_str);
-        let data_type = rust_type_to_data_type(&ty_str);
-
-        let field_args = match TraitFieldArgs::from_attributes(&field.attrs) {
-            Ok(value) => value,
-            Err(error) => return error.write_errors().into(),
+        let field_args = parse_field_args(&field.attrs)?;
+        let data_type = match &field_args.data_type {
+            Some(data_type) => quote!(#data_type),
+            None => rust_type_to_data_type(&ty_str),
         };
-        let mut field_description = String::new();
-        if let Some(value) = field_args.description {
-            field_description = value;
-        }
-        let field_nullable = field_args.nullable.is_present() || is_opt;
+        let field_nullable = field_args.nullable || is_option(&ty_str);
+        let field_description = match field_args.description {
+            Some(value) => quote!(Some(#value.to_string())),
+            None => quote!(None),
+        };
 
         property_builders.push(quote! {
-            ::tesela::ir::Property {
-                api_name: ::tesela::core::ApiName::new_unchecked(#field_name),
+            ::tesela::__private::Property {
+                api_name: ::tesela::__private::ApiName::new_unchecked(#field_name),
                 display: None,
-                description: if #field_description.is_empty() { None } else { Some(#field_description.to_string()) },
+                description: #field_description,
                 data_type: #data_type,
                 nullable: if #field_nullable { Some(true) } else { None },
-                unique: None,
-                indexed: None,
                 default: None,
-                source_column: None,
                 allowed_values: None,
-                sort_order: None,
                 tags: Vec::new(),
-                markings: Vec::new(),
-                encrypted: None,
-                metadata: None,
             }
         });
     }
 
-    let expanded = quote! {
+    Ok(quote! {
         impl #struct_name {
             /// Return the Tesela `Trait` definition for this struct.
-            pub fn tesela_trait() -> ::tesela::ir::Trait {
-                ::tesela::ir::Trait {
-                    api_name: ::tesela::core::ApiName::new_unchecked(#api_name_str),
-                    display: Some(#display_name.to_string()),
-                    description: None,
+            pub fn tesela_trait() -> ::tesela::__private::Trait {
+                ::tesela::__private::Trait {
+                    api_name: ::tesela::__private::ApiName::new_unchecked(#api_name),
+                    display: #display,
+                    description: #description,
                     properties: vec![ #(#property_builders),* ],
                 }
             }
         }
-    };
+    })
+}
 
-    TokenStream::from(expanded)
+fn parse_trait_args(input: &DeriveInput) -> syn::Result<TraitArgs> {
+    let mut args = TraitArgs::default();
+    for attr in tesela_attrs(&input.attrs) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("name") {
+                args.api_name = Some(string_value(&meta)?);
+                return Ok(());
+            }
+            if meta.path.is_ident("display") {
+                args.display = Some(meta.value()?.parse()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("description") {
+                args.description = Some(meta.value()?.parse()?);
+                return Ok(());
+            }
+            Err(unsupported_attr(&meta, "TraitDef"))
+        })?;
+    }
+    Ok(args)
 }

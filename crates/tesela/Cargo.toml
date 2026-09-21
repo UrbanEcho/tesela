@@ -18,6 +18,7 @@ tesela-runtime = { workspace = true }
 tesela-capability = { workspace = true, optional = true }
 tesela-macros = { workspace = true, optional = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 
 [features]
 default = ["macros", "dev"]

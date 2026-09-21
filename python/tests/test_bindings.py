@@ -1,124 +1,192 @@
 from __future__ import annotations
 
-import datetime
-import decimal
-import enum
-import uuid
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError
 from typing import Annotated
 
 import pytest
-
-from tesela import MemoryBackend, Runtime, Spec, TeselaError, Vector
-
-
-def ontology():
-    spec = Spec()
-
-    class Tier(enum.Enum):
-        STANDARD = "standard"
-        PREMIUM = "premium"
-
-    @spec.object_type(primary_key="id")
-    @dataclass
-    class Customer:
-        id: uuid.UUID
-        joined: datetime.date
-        seen_at: datetime.datetime
-        balance: decimal.Decimal
-        tier: Tier
-        embedding: Annotated[list[float], Vector(3)]
-        email: str | None
-
-    @spec.link(from_type=Customer, to_type=Customer)
-    class Referral:
-        pass
-
-    @spec.action(subject=Customer, effects={"reads": True, "writes": False, "external": False, "idempotent": True}, approval="never")
-    class LookupCustomer:
-        id: uuid.UUID
-
-    return spec, Customer, Referral, LookupCustomer, Tier
+import tesela as ts
 
 
-def context():
-    return {"principal": {"id": "test-agent", "claims": {"tenant": "acme"}}, "request_id": "test-request"}
+@ts.object(key="id")
+class Customer:
+    id: str
+    email: str | None = None
+    active: bool = True
+    score: int = 0
+    embedding: Annotated[list[float], ts.vector(3)] = ts.field(default_factory=lambda: [0.0, 0.0, 0.0])
 
 
-def test_semantic_spec_round_trip_and_action_classes_only():
-    spec, Customer, _, _, _ = ontology()
-    document = spec.to_dict()
-    assert set(document) == {"version", "object_types", "link_types", "actions"}
-    assert Spec.from_json(spec.to_json()).to_dict() == document
-    assert Customer.id.name == "id"
-    with pytest.raises(TypeError, match="declaration class"):
-        spec.action(subject=Customer)(lambda: None)
+Referrals = ts.link("referrals", Customer, Customer, cardinality="many")
 
 
-def test_typed_runtime_and_direct_scalar_conversion():
-    spec, Customer, _, _, Tier = ontology()
-    backend = MemoryBackend()
-    runtime = Runtime(spec, objects={Customer: backend}, policy="allow_all")
-    identifier = uuid.uuid4()
-    runtime.mutate(Customer, {"create": {"values": {
-        "id": identifier,
-        "joined": datetime.date(2026, 9, 20),
-        "seen_at": datetime.datetime(2026, 9, 20, 10, 30, tzinfo=datetime.timezone.utc),
-        "balance": decimal.Decimal("12.50"),
-        "tier": Tier.PREMIUM,
-        "embedding": [1.0, 2.0, 3.0],
-        "email": "a@example.test",
-    }}}, context=context())
-    customer = runtime.get(Customer, identifier, context=context())
-    assert isinstance(customer, Customer)
-    assert customer.id == identifier
-    assert customer.joined == datetime.date(2026, 9, 20)
-    assert customer.seen_at.tzinfo is not None
-    assert customer.balance == decimal.Decimal("12.50")
-    assert customer.tier is Tier.PREMIUM
+@ts.action(returns=Customer, pure=True)
+class EchoCustomer:
+    id: str
 
 
-def test_typed_query_builder_is_discoverable():
-    spec, Customer, _, _, Tier = ontology()
-    runtime = Runtime(spec, objects={Customer: MemoryBackend()}, policy="allow_all")
-    for index in range(3):
-        runtime.mutate(Customer, {"create": {"values": {"id": uuid.uuid4(), "joined": "2026-09-20", "seen_at": "2026-09-20T00:00:00", "balance": "1", "tier": "standard", "embedding": [0, 0, 0], "email": f"{index}@example.test"}}}, context=context())
-    rows = runtime.objects(Customer, context=context()).where(Customer.tier == Tier.STANDARD.value).take(2).load()
-    assert len(rows) == 2
-    assert all(isinstance(row, Customer) for row in rows)
+def ctx(**claims: object) -> ts.Context:
+    return ts.context("test-agent", request_id="request-1", claims=claims)
 
 
-def test_actions_are_bound_separately_from_declarations():
-    spec, Customer, _, LookupCustomer, _ = ontology()
-    runtime = Runtime(spec, objects={Customer: MemoryBackend()}, policy="allow_all", actions={LookupCustomer: lambda request: {"status": "success", "output": request["input"]}})
-    identifier = uuid.uuid4()
-    result = runtime.execute_action(LookupCustomer, {"id": identifier}, context=context())
-    assert result["output"]["output"]["id"] == str(identifier)
+def runtime(backend: object | None = None, *, policy=ts.policy.allow_all,
+            links=None, actions=None) -> ts.Runtime:
+    return ts.Runtime({Customer: backend or ts.MemoryBackend()}, policy=policy,
+                      links=links, actions=actions)
 
 
-class FilteringPolicy:
-    def evaluate(self, request):
-        return {"allow": True, "row_filter": {"op": "eq", "field": "email", "value": "visible@example.test"}, "redactions": ["balance"]}
+def test_objects_and_plans_are_frozen_semantic_values() -> None:
+    customer = Customer("c-1")
+    assert customer.email is None
+    assert not isinstance(Customer.active, ts.Expr)  # fields are never query descriptors
+    assert "id" not in Customer.__dict__
+    with pytest.raises(FrozenInstanceError):
+        customer.active = False  # type: ignore[misc]
+    base = ts.query(Customer)
+    filtered = base.where(ts.col("active") & (ts.col("email") != None)).limit(10)  # noqa: E711
+    assert base.predicates == ()
+    assert len(filtered.predicates) == 1
+    with pytest.raises(TypeError, match="Tesela expressions"):
+        bool(ts.col("active"))
+    update = ts.update(Customer, "c-1", email="next@example.test")
+    with pytest.raises(TypeError):
+        update.changes["email"] = "mutated@example.test"  # type: ignore[index]
+
+    claims = {"tenant": "acme"}
+    context = ts.context("test-agent", request_id="immutable", claims=claims)
+    claims["tenant"] = "changed"
+    assert context.claims["tenant"] == "acme"
 
 
-def test_python_policy_reentry_filters_get_and_redacts():
-    spec, Customer, _, _, _ = ontology()
-    backend = MemoryBackend()
-    runtime = Runtime(spec, objects={Customer: backend}, policy=FilteringPolicy())
-    common = {"joined": "2026-09-20", "seen_at": "2026-09-20T00:00:00", "balance": "3", "tier": "standard", "embedding": [0, 0, 0]}
-    visible, hidden = uuid.uuid4(), uuid.uuid4()
-    seed = Runtime(spec, objects={Customer: backend}, policy="allow_all")
-    seed.mutate(Customer, {"create": {"values": {"id": visible, "email": "visible@example.test", **common}}}, context=context())
-    seed.mutate(Customer, {"create": {"values": {"id": hidden, "email": "hidden@example.test", **common}}}, context=context())
-    assert runtime.get(Customer, visible, context=context()).email == "visible@example.test"
-    with pytest.raises(TeselaError):
-        runtime.get(Customer, hidden, context=context())
+def test_crud_returns_typed_values_and_optional_get() -> None:
+    rt, context = runtime(), ctx(tenant="acme")
+    created = rt.run(ts.create(Customer("c-1", "a@example.test", score=7)), context)
+    assert created == Customer("c-1", "a@example.test", score=7)
+    assert rt.run(ts.get(Customer, "missing"), context) is None
+    assert rt.run(ts.get(Customer, "c-1"), context) == created
+    page = rt.run(ts.query(Customer).where(ts.col("email").ends_with("example.test")), context)
+    assert page.items == (created,)
+    changed = rt.run(ts.update(Customer, "c-1", email="b@example.test"), context)
+    assert changed.email == "b@example.test"
+    execution = rt.execute(ts.get(Customer, "c-1"), context)
+    assert execution.value == changed
+    assert execution.receipt["operation"] == "read"
+    rt.run(ts.delete(Customer, "c-1"), context)
+    assert rt.run(ts.get(Customer, "c-1"), context) is None
 
 
-def test_invalid_runtime_limit_is_a_typed_error():
-    spec, Customer, _, _, _ = ontology()
-    with pytest.raises(TeselaError) as raised:
-        Runtime(spec, objects={Customer: MemoryBackend()}, policy="allow_all", max_query_limit=0)
-    assert raised.value.code == "validation"
-    assert raised.value.retryable is False
-    assert raised.value.side_effect == "not_started"
+def test_execution_requires_explicit_context() -> None:
+    with pytest.raises(TypeError):
+        ts.context("test-agent")
+    with pytest.raises(ValueError, match="request_id"):
+        ts.context("test-agent", request_id="")
+    with pytest.raises(TypeError, match="explicit"):
+        runtime().run(ts.query(Customer), None)  # type: ignore[arg-type]
+
+
+def test_repository_callbacks_receive_typed_values_and_context() -> None:
+    stored: dict[str, Customer] = {}
+    seen: list[str] = []
+
+    def create(context: ts.Context, value: Customer) -> Customer:
+        seen.append(context.claims["tenant"])
+        assert context.request_id == "request-1"
+        assert context.budget is not None and context.budget.calls == 4
+        stored[value.id] = value
+        return value
+
+    def get(_context: ts.Context, key: str) -> Customer | None:
+        return stored.get(key)
+
+    repository = ts.backend(scan=lambda _context: stored.values(), create=create, get=get)
+    rt = runtime(repository)
+    context = ts.context("test-agent", request_id="request-1", claims={"tenant": "acme"},
+                         budget=ts.budget(calls=4))
+    value = rt.run(ts.create(Customer("c-1")), context)
+    assert isinstance(value, Customer)
+    assert seen == ["acme"]
+    assert rt.run(ts.query(Customer), ctx()).items == (value,)
+
+
+def test_policy_functions_filter_and_redact() -> None:
+    backend = ts.MemoryBackend()
+    seed = runtime(backend)
+    seed.run(ts.create(Customer("visible", "visible@example.test", score=9)), ctx())
+    seed.run(ts.create(Customer("hidden", "hidden@example.test", score=9)), ctx())
+
+    def policy(request: ts.policy.Request) -> ts.policy.Decision:
+        assert request.principal == "test-agent"
+        return ts.policy.allow(where=ts.col("id") == "visible", redact=("email",))
+
+    page = runtime(backend, policy=policy).run(ts.query(Customer), ctx())
+    assert len(page.items) == 1
+    assert page.items[0].id == "visible"
+    assert page.items[0].email is None
+
+
+def test_links_actions_aggregation_batch_and_introspection() -> None:
+    rt = runtime(
+        links={Referrals: lambda _context, source: ["b"] if source == "a" else []},
+        actions={EchoCustomer: lambda _context, command: Customer(command.id)},
+    )
+    context = ctx()
+    rt.run(ts.batch(ts.create(Customer("a", score=1)), ts.create(Customer("b", score=2))), context)
+    linked = rt.run(ts.traverse(Referrals, "a"), context)
+    assert [item.id for item in linked] == ["b"]
+    groups = rt.run(ts.query(Customer).group_by("active").agg(total=ts.count()), context)
+    assert groups.groups[0]["total"] == 2
+    assert rt.run(EchoCustomer("a"), context).id == "a"
+    assert rt.schema().objects[0]["api_name"] == "customer"
+    assert rt.capabilities(context)["capabilities"]
+    assert rt.explain(ts.query(Customer), context)["resource"] == "customer"
+
+
+def test_invalid_declarations_fail_early() -> None:
+    with pytest.raises(ValueError, match="effects"):
+        @ts.action(returns=Customer)
+        class InvalidAction:
+            value: str
+
+    with pytest.raises(ValueError, match="concurrency"):
+        ts.action(returns=str, pure=True, concurrency="eventually")
+
+    with pytest.raises(ValueError, match="approval"):
+        ts.action(returns=str, pure=True, approval="sometimes")
+
+    with pytest.raises(ValueError, match="risk"):
+        ts.action(returns=str, pure=True, risk="catastrophic")
+
+    with pytest.raises(ValueError, match="annotated"):
+        @ts.object(key="missing")
+        class InvalidObject:
+            id: str
+
+
+def test_atomic_batch_rejection_never_invokes_non_atomic_backend() -> None:
+    calls = 0
+
+    def create(_context: ts.Context, value: Customer) -> Customer:
+        nonlocal calls
+        calls += 1
+        return value
+
+    rt = runtime(ts.backend(create=create))
+    with pytest.raises(ts.Error) as raised:
+        rt.run(ts.batch(ts.create(Customer("a")), ts.create(Customer("b"))), ctx())
+    assert raised.value.code == ts.ErrorCode.UNSUPPORTED_CAPABILITY
+    assert calls == 0
+
+
+def test_native_and_residual_aggregation_are_equivalent() -> None:
+    rows = [Customer("a", score=1), Customer("b", score=2)]
+
+    class NativeCustomers(ts.backend.Native[Customer]):
+        def search(self, _context: ts.Context, _query):
+            return rows
+
+        def aggregate(self, _context: ts.Context, _query):
+            return {"groups": [{"total": 2}]}
+
+    plan = ts.query(Customer).group_by().agg(total=ts.count())
+    pushed = runtime(NativeCustomers()).run(plan, ctx())
+    residual = runtime(ts.backend(scan=lambda _context: rows)).run(plan, ctx())
+    assert pushed == residual

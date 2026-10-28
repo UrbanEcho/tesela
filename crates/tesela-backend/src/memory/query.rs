@@ -1,7 +1,7 @@
 //! Atomic mutation and one-pass aggregation helpers.
 
 use super::*;
-use crate::residual::CompiledResidualFilter;
+use crate::residual::{Borrowed, Predicate};
 
 pub(super) fn check_revision(record: &Record, expected: Option<&Revision>) -> Result<(), Error> {
     if let Some(expected) = expected
@@ -17,7 +17,8 @@ pub(super) fn check_revision(record: &Record, expected: Option<&Revision>) -> Re
 
 fn check_preconditions(record: &Record, preconditions: &[tesela_ir::Filter]) -> Result<(), Error> {
     for precondition in preconditions {
-        if !CompiledResidualFilter::compile(precondition)?.matches(&record.values) {
+        let access = Borrowed::default();
+        if !Predicate::compile(&access, precondition)?.matches(&access, &record) {
             return Err(Error::new(
                 tesela_core::ErrorCode::PreconditionFailed,
                 "mutation precondition was not satisfied",

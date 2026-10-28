@@ -30,7 +30,7 @@ impl Runtime {
         let mut page = backend.search(context, object, &query)?;
         redact(&mut page.records, &decision.redactions);
         context.charge_rows(page.records.len() as u64)?;
-        context.charge_bytes(records_bytes(&page.records))?;
+        charge_bytes_with(context, || records_bytes(&page.records))?;
         Ok(self.finish(
             context,
             &snapshot,
@@ -87,7 +87,7 @@ impl Runtime {
         if let Some(record) = record.as_mut() {
             redact(std::slice::from_mut(record), &decision.redactions);
             context.charge_rows(1)?;
-            context.charge_bytes(records_bytes(std::slice::from_ref(record)))?;
+            charge_bytes_with(context, || records_bytes(std::slice::from_ref(record)))?;
         }
         Ok(self.finish(
             context,
@@ -144,12 +144,15 @@ impl Runtime {
             ));
         }
         let backend = object_backend(&snapshot, object_type)?;
-        let mutation =
+        let mut mutation =
             prepare_mutation(context, backend.as_ref(), object_type, mutation, &decision)?;
-        if let Some(input) = mutation_input(&mutation) {
-            context.charge_bytes(value_bytes(&input))?;
+        if let Mutation::Create { values }
+        | Mutation::Update { values, .. }
+        | Mutation::Upsert { values, .. } = &mutation
+        {
+            charge_bytes_with(context, || fields_bytes(values))?;
         }
-        validate_mutation(&snapshot.ontology, object_type, &mutation)?;
+        normalize_mutation(&snapshot.ontology, object_type, &mut mutation)?;
         let capabilities = backend.capabilities();
         if matches!(mutation, Mutation::Upsert { .. }) && !capabilities.upsert {
             return Err(Error::unsupported("backend does not provide atomic upsert"));
@@ -158,13 +161,7 @@ impl Runtime {
             return Err(Error::unsupported("backend does not provide atomic batch"));
         }
         context.charge_backend_call()?;
-        let result = apply_mutation(
-            context,
-            &snapshot.ontology,
-            backend.as_ref(),
-            object_type,
-            mutation,
-        )?;
+        let result = apply_mutation(context, backend.as_ref(), object_type, mutation)?;
         let approval_required = decision.require_approval;
         Ok(self.finish(
             context,

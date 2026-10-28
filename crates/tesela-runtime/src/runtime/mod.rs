@@ -1,6 +1,6 @@
 //! Compiled, authority-aware ontology execution.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,9 +8,9 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use tesela_backend::{
-    ActionExecutor, ActionRequest, AggregateQuery, AggregationFunction, Backend, Bindings,
-    ExecutionEvent, ExecutionObserver, LinkResolver, Mutation, PolicyDecision, PolicyEngine,
-    PolicyRequest, Query, TraversalQuery, check_backend, compare_records,
+    ActionExecutor, ActionRequest, AggregateQuery, Backend, Bindings, ExecutionEvent,
+    ExecutionObserver, LinkResolver, Mutation, PolicyDecision, PolicyEngine, PolicyRequest, Query,
+    TraversalQuery, check_backend, compare_records,
 };
 use tesela_core::{
     ApiName, Error, ErrorCode, ExecutionContext, Key, Operation, ResourceKind, SideEffectStatus,

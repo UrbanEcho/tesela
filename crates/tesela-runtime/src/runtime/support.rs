@@ -52,17 +52,60 @@ pub(super) fn check_query(object: &CompiledObjectType, query: &Query) -> Result<
     Ok(())
 }
 
+/// Apply defaults and validate a mutation in place, once, before it runs.
+///
+/// Batch items are only checked: they reach the backend as submitted.
+pub(super) fn normalize_mutation(
+    ontology: &CompiledOntology,
+    object: &CompiledObjectType,
+    mutation: &mut Mutation,
+) -> Result<(), Error> {
+    match mutation {
+        Mutation::Create { values } | Mutation::Upsert { values, .. } => {
+            validate_new(ontology, object, values).map(drop)
+        }
+        Mutation::Update { values, .. } => ontology.validate_patch(object, values),
+        Mutation::Delete { .. } => Ok(()),
+        Mutation::Batch { items } => {
+            if items.is_empty() {
+                return Err(Error::bad_request("batch requires at least one mutation"));
+            }
+            for item in items.iter() {
+                if matches!(item, Mutation::Batch { .. }) {
+                    return Err(Error::bad_request("nested batches are not supported"));
+                }
+                match item {
+                    Mutation::Create { values } | Mutation::Upsert { values, .. } => {
+                        validate_new(ontology, object, &mut values.clone())?;
+                    }
+                    Mutation::Update { values, .. } => ontology.validate_patch(object, values)?,
+                    Mutation::Delete { .. } | Mutation::Batch { .. } => {}
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_new(
+    ontology: &CompiledOntology,
+    object: &CompiledObjectType,
+    values: &mut BTreeMap<ApiName, Value>,
+) -> Result<Key, Error> {
+    object.apply_defaults(values);
+    ontology.validate_create(object, values)?;
+    primary_key(object, values)
+}
+
+/// Run a mutation that [`normalize_mutation`] already validated.
 pub(super) fn apply_mutation(
     context: &ExecutionContext,
-    ontology: &CompiledOntology,
     backend: &dyn Backend,
     object: &CompiledObjectType,
     mutation: Mutation,
 ) -> Result<MutationResult, Error> {
     match mutation {
-        Mutation::Create { mut values } => {
-            object.apply_defaults(&mut values);
-            ontology.validate_create(object, &values)?;
+        Mutation::Create { values } => {
             let key = primary_key(object, &values)?;
             backend.create(context, object.api_name(), key, values)
         }
@@ -71,16 +114,13 @@ pub(super) fn apply_mutation(
             values,
             expected_revision,
             ..
-        } => {
-            ontology.validate_patch(object, &values)?;
-            backend.update(
-                context,
-                object.api_name(),
-                &primary_key,
-                values,
-                expected_revision.as_ref(),
-            )
-        }
+        } => backend.update(
+            context,
+            object.api_name(),
+            &primary_key,
+            values,
+            expected_revision.as_ref(),
+        ),
         Mutation::Delete {
             primary_key,
             expected_revision,
@@ -92,12 +132,10 @@ pub(super) fn apply_mutation(
             expected_revision.as_ref(),
         ),
         Mutation::Upsert {
-            mut values,
+            values,
             expected_revision,
             ..
         } => {
-            object.apply_defaults(&mut values);
-            ontology.validate_create(object, &values)?;
             let key = primary_key(object, &values)?;
             backend.upsert(
                 context,
@@ -114,35 +152,6 @@ pub(super) fn apply_mutation(
             &items,
         ),
     }
-}
-
-pub(super) fn validate_mutation(
-    ontology: &CompiledOntology,
-    object: &CompiledObjectType,
-    mutation: &Mutation,
-) -> Result<(), Error> {
-    match mutation {
-        Mutation::Create { values } | Mutation::Upsert { values, .. } => {
-            let mut values = values.clone();
-            object.apply_defaults(&mut values);
-            ontology.validate_create(object, &values)?;
-            primary_key(object, &values)?;
-        }
-        Mutation::Update { values, .. } => ontology.validate_patch(object, values)?,
-        Mutation::Delete { .. } => {}
-        Mutation::Batch { items } => {
-            if items.is_empty() {
-                return Err(Error::bad_request("batch requires at least one mutation"));
-            }
-            for item in items {
-                if matches!(item, Mutation::Batch { .. }) {
-                    return Err(Error::bad_request("nested batches are not supported"));
-                }
-                validate_mutation(ontology, object, item)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn primary_key(
@@ -208,6 +217,21 @@ pub(super) fn records_bytes(records: &[Record]) -> u64 {
         .iter()
         .map(|record| value_bytes(&record.primary_key.to_value()) + fields_bytes(&record.values))
         .sum()
+}
+
+/// Charge the byte budget, measuring only when a limit exists.
+///
+/// Usage counters are never observable without a limit, so an unbounded
+/// context skips the size walk entirely.
+pub(super) fn charge_bytes_with(
+    context: &ExecutionContext,
+    measure: impl FnOnce() -> u64,
+) -> Result<(), Error> {
+    if context.budget().bytes.is_some() {
+        context.charge_bytes(measure())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn validate_schema(schema: &Value, input: &Value) -> Result<(), Error> {
@@ -280,114 +304,4 @@ fn validate_schema_at(
         }
     }
     Ok(())
-}
-
-#[derive(Clone)]
-pub(super) struct AggregateState {
-    count: u64,
-    sum: f64,
-    numeric_count: u64,
-    min: Option<Value>,
-    max: Option<Value>,
-}
-impl Default for AggregateState {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            sum: 0.0,
-            numeric_count: 0,
-            min: None,
-            max: None,
-        }
-    }
-}
-
-pub(super) struct AggregateAccumulator<'a> {
-    query: &'a AggregateQuery,
-    visible_groups: Vec<ApiName>,
-    groups: HashMap<Vec<Key>, Vec<AggregateState>>,
-}
-
-impl<'a> AggregateAccumulator<'a> {
-    pub(super) fn new(query: &'a AggregateQuery, redactions: &[ApiName]) -> Self {
-        Self {
-            query,
-            visible_groups: query
-                .group_by
-                .iter()
-                .filter(|field| !redactions.contains(field))
-                .cloned()
-                .collect(),
-            groups: HashMap::new(),
-        }
-    }
-
-    pub(super) fn extend(&mut self, records: &[Record]) {
-        for record in records {
-            let key: Vec<Key> = self
-                .visible_groups
-                .iter()
-                .map(|field| record.values.get(field).map_or(Key::Null, Key::from))
-                .collect();
-            let states = self
-                .groups
-                .entry(key)
-                .or_insert_with(|| vec![AggregateState::default(); self.query.aggregations.len()]);
-            for (aggregation, state) in self.query.aggregations.iter().zip(states) {
-                state.count += 1;
-                if let Some(value) = aggregation
-                    .property
-                    .as_ref()
-                    .and_then(|field| record.values.get(field))
-                {
-                    if let Some(number) = value.as_f64() {
-                        state.sum += number;
-                        state.numeric_count += 1;
-                    }
-                    if state.min.as_ref().is_none_or(|current| value < current) {
-                        state.min = Some(value.clone());
-                    }
-                    if state.max.as_ref().is_none_or(|current| value > current) {
-                        state.max = Some(value.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    pub(super) fn finish(mut self) -> AggregateResult {
-        if self.groups.is_empty() && self.visible_groups.is_empty() {
-            self.groups.insert(
-                Vec::new(),
-                vec![AggregateState::default(); self.query.aggregations.len()],
-            );
-        }
-        let mut groups: Vec<_> = self.groups.into_iter().collect();
-        groups.sort_by(|left, right| left.0.cmp(&right.0));
-        AggregateResult {
-            groups: groups
-                .into_iter()
-                .map(|(key, states)| {
-                    let mut row = BTreeMap::new();
-                    for (field, value) in self.visible_groups.iter().zip(key) {
-                        row.insert(field.to_string(), value.to_value());
-                    }
-                    for (aggregation, state) in self.query.aggregations.iter().zip(states) {
-                        let value = match aggregation.function {
-                            AggregationFunction::Count => Value::integer(state.count as i64),
-                            AggregationFunction::Sum => Value::float(state.sum),
-                            AggregationFunction::Avg if state.numeric_count > 0 => {
-                                Value::float(state.sum / state.numeric_count as f64)
-                            }
-                            AggregationFunction::Avg => Value::null(),
-                            AggregationFunction::Min => state.min.unwrap_or_default(),
-                            AggregationFunction::Max => state.max.unwrap_or_default(),
-                        };
-                        row.insert(aggregation.alias.clone(), value);
-                    }
-                    row
-                })
-                .collect(),
-        }
-    }
 }

@@ -42,7 +42,8 @@ impl Runtime {
         let result = if backend.capabilities().aggregate {
             backend.aggregate(context, object, &effective)?
         } else {
-            let mut accumulator = AggregateAccumulator::new(&query, &decision.redactions);
+            let mut accumulator =
+                tesela_backend::AggregateAccumulator::new(&query, &decision.redactions);
             let mut cursor = None;
             loop {
                 let page = backend.search(
@@ -56,7 +57,7 @@ impl Runtime {
                     },
                 )?;
                 context.charge_rows(page.records.len() as u64)?;
-                context.charge_bytes(records_bytes(&page.records))?;
+                charge_bytes_with(context, || records_bytes(&page.records))?;
                 accumulator.extend(&page.records);
                 cursor = page.next_cursor;
                 if cursor.is_none() {
@@ -218,7 +219,7 @@ impl Runtime {
         decision.obligations.extend(target_decision.obligations);
         redact(&mut page.records, &decision.redactions);
         context.charge_rows(page.records.len() as u64)?;
-        context.charge_bytes(records_bytes(&page.records))?;
+        charge_bytes_with(context, || records_bytes(&page.records))?;
         Ok(self.finish(
             context,
             &snapshot,

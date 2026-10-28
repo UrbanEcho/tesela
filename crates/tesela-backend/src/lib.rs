@@ -5,6 +5,7 @@
 //!
 //! Tesela owns the ontology contract. Hosts own concrete persistence and service integrations.
 
+mod aggregate;
 pub mod conformance;
 #[cfg(any(feature = "dev", test))]
 mod memory;
@@ -12,6 +13,7 @@ mod query;
 mod residual;
 mod traits;
 
+pub use aggregate::AggregateAccumulator;
 #[cfg(any(feature = "dev", test))]
 pub use memory::MemoryBackend;
 pub use query::*;

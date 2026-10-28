@@ -7,12 +7,16 @@ use std::sync::{Arc, RwLock};
 use tesela_core::{ApiName, Error, ExecutionContext, Key, Value, lock_read, lock_write};
 use tesela_ir::{AggregateResult, MutationResult, Page, Record, Revision};
 
-use crate::{
-    AggregateQuery, Backend, BackendCapabilities, LinkResolver, Mutation, Query, execute_residual,
-};
+use crate::aggregate::Aggregator;
+use crate::residual::{Predicate, execute_rows};
+use crate::{AggregateQuery, Backend, BackendCapabilities, LinkResolver, Mutation, Query};
 
-mod query;
-use query::*;
+mod batch;
+mod table;
+use batch::{apply, check_revision, roll_back};
+use table::{Columns, Table};
+
+type Shared = Arc<RwLock<Table>>;
 
 /// A thread-safe in-memory backend.
 ///
@@ -20,8 +24,11 @@ use query::*;
 /// the primary key arrives already extracted, and the only physical fact it
 /// holds — which property carries a link's source key — is something the host
 /// states explicitly with [`MemoryBackend::bind_link`].
+///
+/// Each object type owns its table and lock, so work on one type never waits
+/// for another. Rows are dense vectors over an interned field dictionary.
 pub struct MemoryBackend {
-    records: RwLock<HashMap<ApiName, BTreeMap<Key, Record>>>,
+    tables: RwLock<HashMap<ApiName, Shared>>,
     links: RwLock<HashMap<ApiName, ApiName>>,
     revision: AtomicU64,
 }
@@ -31,7 +38,7 @@ impl MemoryBackend {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            records: RwLock::new(HashMap::new()),
+            tables: RwLock::new(HashMap::new()),
             links: RwLock::new(HashMap::new()),
             revision: AtomicU64::new(1),
         })
@@ -53,9 +60,8 @@ impl MemoryBackend {
 
     /// How many records an object type holds.
     pub fn len(&self, object_type: &ApiName) -> Result<usize, Error> {
-        Ok(lock_read(&self.records)?
-            .get(object_type)
-            .map_or(0, BTreeMap::len))
+        self.table(object_type)?
+            .map_or(Ok(0), |table| Ok(lock_read(&table)?.rows.len()))
     }
 
     /// Whether an object type holds no records.
@@ -65,6 +71,20 @@ impl MemoryBackend {
 
     fn next_revision(&self) -> Revision {
         Revision::new(self.revision.fetch_add(1, Ordering::Relaxed).to_string())
+    }
+
+    fn table(&self, object_type: &ApiName) -> Result<Option<Shared>, Error> {
+        Ok(lock_read(&self.tables)?.get(object_type).cloned())
+    }
+
+    fn table_or_create(&self, object_type: &ApiName) -> Result<Shared, Error> {
+        if let Some(table) = self.table(object_type)? {
+            return Ok(table);
+        }
+        Ok(lock_write(&self.tables)?
+            .entry(object_type.clone())
+            .or_default()
+            .clone())
     }
 }
 
@@ -93,11 +113,15 @@ impl Backend for MemoryBackend {
         object_type: &ApiName,
         query: &Query,
     ) -> Result<Page, Error> {
-        let records = lock_read(&self.records)?;
-        let Some(records_for_type) = records.get(object_type) else {
+        let Some(table) = self.table(object_type)? else {
             return Ok(Page::default());
         };
-        execute_residual(records_for_type.values(), query)
+        let table = lock_read(&table)?;
+        let page = execute_rows(&Columns(&table), table.rows.values().map(Ok), query)?;
+        Ok(Page {
+            records: page.rows.into_iter().map(|row| table.record(row)).collect(),
+            next_cursor: page.next_cursor,
+        })
     }
 
     fn get(
@@ -106,10 +130,11 @@ impl Backend for MemoryBackend {
         object_type: &ApiName,
         primary_key: &Key,
     ) -> Result<Option<Record>, Error> {
-        Ok(lock_read(&self.records)?
-            .get(object_type)
-            .and_then(|records_for_type| records_for_type.get(primary_key))
-            .cloned())
+        let Some(table) = self.table(object_type)? else {
+            return Ok(None);
+        };
+        let table = lock_read(&table)?;
+        Ok(table.rows.get(primary_key).map(|row| table.record(row)))
     }
 
     fn create(
@@ -119,16 +144,16 @@ impl Backend for MemoryBackend {
         primary_key: Key,
         values: BTreeMap<ApiName, Value>,
     ) -> Result<MutationResult, Error> {
-        let mut records = lock_write(&self.records)?;
-        let records_for_type = records.entry(object_type.clone()).or_default();
-        if records_for_type.contains_key(&primary_key) {
+        let shared = self.table_or_create(object_type)?;
+        let mut table = lock_write(&shared)?;
+        if table.rows.contains_key(&primary_key) {
             return Err(Error::conflict(format!(
                 "record '{primary_key}' already exists in '{object_type}'"
             )));
         }
-        let mut record = Record::new(primary_key.clone(), values);
-        record.revision = Some(self.next_revision());
-        records_for_type.insert(primary_key, record.clone());
+        let row = table.row(primary_key.clone(), &values, self.next_revision());
+        let record = table.record(&row);
+        table.replace(&primary_key, Some(row));
         Ok(MutationResult {
             record: Some(record),
             rows_affected: Some(1),
@@ -143,18 +168,17 @@ impl Backend for MemoryBackend {
         values: BTreeMap<ApiName, Value>,
         expected_revision: Option<&Revision>,
     ) -> Result<MutationResult, Error> {
-        let mut records = lock_write(&self.records)?;
-        let records_for_type = records.entry(object_type.clone()).or_default();
-        let record = records_for_type
-            .get_mut(primary_key)
+        let shared = self.table_or_create(object_type)?;
+        let mut table = lock_write(&shared)?;
+        let row = table
+            .rows
+            .get(primary_key)
             .ok_or_else(|| Error::not_found("record", primary_key))?;
-        check_revision(record, expected_revision)?;
-        for (field, value) in values {
-            record.values.insert(field, value);
-        }
-        record.revision = Some(self.next_revision());
+        check_revision(row, expected_revision)?;
+        table.patch(primary_key, &values, self.next_revision(), false);
+        let record = table.rows.get(primary_key).map(|row| table.record(row));
         Ok(MutationResult {
-            record: Some(record.clone()),
+            record,
             rows_affected: Some(1),
         })
     }
@@ -166,12 +190,12 @@ impl Backend for MemoryBackend {
         primary_key: &Key,
         expected_revision: Option<&Revision>,
     ) -> Result<MutationResult, Error> {
-        let mut records = lock_write(&self.records)?;
-        let records_for_type = records.entry(object_type.clone()).or_default();
-        if let Some(record) = records_for_type.get(primary_key) {
-            check_revision(record, expected_revision)?;
+        let shared = self.table_or_create(object_type)?;
+        let mut table = lock_write(&shared)?;
+        if let Some(row) = table.rows.get(primary_key) {
+            check_revision(row, expected_revision)?;
         }
-        let removed = records_for_type.remove(primary_key).is_some();
+        let removed = table.replace(primary_key, None).is_some();
         Ok(MutationResult {
             record: None,
             rows_affected: Some(i64::from(removed)),
@@ -186,18 +210,18 @@ impl Backend for MemoryBackend {
         values: BTreeMap<ApiName, Value>,
         expected_revision: Option<&Revision>,
     ) -> Result<MutationResult, Error> {
-        let mut records = lock_write(&self.records)?;
-        let records_for_type = records.entry(object_type.clone()).or_default();
-        if let Some(existing) = records_for_type.get(&primary_key) {
+        let shared = self.table_or_create(object_type)?;
+        let mut table = lock_write(&shared)?;
+        if let Some(existing) = table.rows.get(&primary_key) {
             check_revision(existing, expected_revision)?;
         } else if expected_revision.is_some() {
             return Err(Error::stale_revision(
                 "record does not exist at the expected revision",
             ));
         }
-        let mut record = Record::new(primary_key.clone(), values);
-        record.revision = Some(self.next_revision());
-        records_for_type.insert(primary_key, record.clone());
+        let row = table.row(primary_key.clone(), &values, self.next_revision());
+        let record = table.record(&row);
+        table.replace(&primary_key, Some(row));
         Ok(MutationResult {
             record: Some(record),
             rows_affected: Some(1),
@@ -211,14 +235,25 @@ impl Backend for MemoryBackend {
         primary_key: &ApiName,
         mutations: &[Mutation],
     ) -> Result<MutationResult, Error> {
-        let mut records = lock_write(&self.records)?;
-        let current = records.entry(object_type.clone()).or_default();
-        let mut staged = current.clone();
+        let shared = self.table_or_create(object_type)?;
+        let mut table = lock_write(&shared)?;
+        let mut undo = Vec::with_capacity(mutations.len());
         let mut affected = 0i64;
         for mutation in mutations {
-            affected += apply_staged(&mut staged, primary_key, mutation, || self.next_revision())?;
+            match apply(
+                &mut table,
+                primary_key,
+                mutation,
+                || self.next_revision(),
+                &mut undo,
+            ) {
+                Ok(count) => affected += count,
+                Err(error) => {
+                    roll_back(&mut table, undo);
+                    return Err(error);
+                }
+            }
         }
-        *current = staged;
         Ok(MutationResult {
             record: None,
             rows_affected: Some(affected),
@@ -227,24 +262,30 @@ impl Backend for MemoryBackend {
 
     fn aggregate(
         &self,
-        context: &ExecutionContext,
+        _context: &ExecutionContext,
         object_type: &ApiName,
         query: &AggregateQuery,
     ) -> Result<AggregateResult, Error> {
-        let page = self.search(
-            context,
-            object_type,
-            &Query {
-                filter: query.filter.clone(),
-                limit: Some(i32::MAX),
-                ..Query::default()
-            },
-        )?;
-        Ok(compute_aggregate(
-            &page.records,
-            &query.group_by,
-            &query.aggregations,
-        ))
+        let shared = self.table(object_type)?;
+        let guard = shared.as_ref().map(|table| lock_read(table)).transpose()?;
+        let empty = Table::default();
+        let table = guard.as_deref().unwrap_or(&empty);
+        let access = Columns(table);
+        let filter = query
+            .filter
+            .as_ref()
+            .map(|filter| Predicate::compile(&access, filter))
+            .transpose()?;
+        let mut aggregator = Aggregator::new(&access, query.group_by.clone(), &query.aggregations);
+        for row in table.rows.values() {
+            if filter
+                .as_ref()
+                .is_none_or(|filter| filter.matches(&access, &row))
+            {
+                aggregator.add(&access, &row);
+            }
+        }
+        Ok(aggregator.finish())
     }
 }
 
@@ -259,20 +300,15 @@ impl LinkResolver for MemoryBackend {
         let property = lock_read(&self.links)?.get(link).cloned().ok_or_else(|| {
             Error::unsupported(format!("link '{link}' is not bound in this memory backend"))
         })?;
-        let records = lock_read(&self.records)?;
-        let Some(records_for_type) = records.get(target) else {
+        let Some(table) = self.table(target)? else {
             return Ok(Vec::new());
         };
-        Ok(records_for_type
-            .values()
-            .filter(|record| {
-                record
-                    .values
-                    .get(&property)
-                    .map(Key::from)
-                    .is_some_and(|value| value == *source_key)
-            })
-            .map(|record| record.primary_key.clone())
-            .collect())
+        if let Some(keys) = lock_read(&table)?.lookup(&property, source_key) {
+            return Ok(keys);
+        }
+        Ok(lock_write(&table)?.linked(&property, source_key))
     }
 }
+
+#[cfg(test)]
+mod tests;

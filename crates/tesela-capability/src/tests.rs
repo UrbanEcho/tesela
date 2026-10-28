@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use tesela_core::{DataType, ExecutionBudget, Principal};
-use tesela_ir::{ObjectType, Property};
+use tesela_core::{ApiName, DataType, ExecutionBudget, ExecutionContext, Key, Principal, Value};
+use tesela_ir::{ObjectType, Property, Record, Spec};
 
 use super::*;
 

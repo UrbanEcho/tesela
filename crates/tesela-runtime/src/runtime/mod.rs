@@ -269,8 +269,10 @@ mod actions;
 mod aggregate;
 mod auth;
 mod data;
+mod invoke;
 mod project;
 mod schema;
 mod support;
 
+pub use invoke::InvocationOutput;
 use support::*;

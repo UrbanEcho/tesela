@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use tesela_core::{Operation, RiskLevel, Value};
-use tesela_ir::{ActionEffects, Concurrency, Filter, SemanticFingerprint};
+use tesela_ir::{ActionEffects, Concurrency, Filter, Revision, SemanticFingerprint};
 
 /// How a capability may be exposed to a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,4 +137,13 @@ pub struct CapabilityInvocation {
     /// Input payload, shaped by the capability's `input_schema`.
     #[serde(default)]
     pub input: Value,
+    /// Subject revision the caller expects; required when the capability requires one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<Revision>,
+    /// Caller-supplied run identity used for action idempotency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Keep search or traversal records in a bounded handle instead of returning them inline.
+    #[serde(default)]
+    pub retain_results: bool,
 }

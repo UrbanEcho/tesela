@@ -17,5 +17,6 @@ mod runtime_tests;
 
 pub use policy::AllowAllPolicy;
 pub use runtime::{
-    AccessExplanation, Execution, ExecutionPlan, ExecutionReceipt, Runtime, RuntimeBuilder,
+    AccessExplanation, Execution, ExecutionPlan, ExecutionReceipt, InvocationOutput, Runtime,
+    RuntimeBuilder,
 };

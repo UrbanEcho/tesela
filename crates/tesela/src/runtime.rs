@@ -50,6 +50,23 @@ impl Runtime {
     ) -> Result<raw::capability::CapabilityCatalog, Error> {
         self.inner.capabilities(context, task.unwrap_or_default())
     }
+    /// Invoke a capability from a catalog returned by [`Runtime::capabilities`].
+    ///
+    /// Routes through the same checked paths as typed plans, so policy,
+    /// authority, approvals and revision checks still apply. Stale or hidden
+    /// capabilities are rejected before any host effect.
+    pub fn invoke(
+        &self,
+        context: &crate::Context,
+        invocation: raw::capability::CapabilityInvocation,
+    ) -> Result<Execution<raw::InvocationOutput>, Error> {
+        let execution = self.inner.invoke(context, invocation)?;
+        Ok(Execution {
+            value: execution.output,
+            receipt: execution.receipt,
+            revision: None,
+        })
+    }
     /// Current immutable semantic schema.
     #[must_use]
     pub fn schema(&self) -> Schema {

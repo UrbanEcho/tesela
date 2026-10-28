@@ -425,6 +425,22 @@ impl NativeRuntime {
                 .map_err(runtime_error)?,
         )
     }
+    fn invoke(
+        &self,
+        py: Python<'_>,
+        context: &Bound<'_, PyAny>,
+        invocation: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let invocation = decode::<tesela::raw::capability::CapabilityInvocation>(invocation)?;
+        encode(
+            py,
+            &self
+                .inner
+                .invoke(&context_from_py(context)?, invocation)
+                .map_err(runtime_error)?
+                .output,
+        )
+    }
     fn explain(
         &self,
         py: Python<'_>,

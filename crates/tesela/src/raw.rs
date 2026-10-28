@@ -8,5 +8,6 @@ pub use tesela_core::*;
 pub use tesela_ir::*;
 pub use tesela_runtime::capability;
 pub use tesela_runtime::{
-    AccessExplanation, Execution as RawExecution, ExecutionPlan, ExecutionReceipt, Runtime,
+    AccessExplanation, Execution as RawExecution, ExecutionPlan, ExecutionReceipt,
+    InvocationOutput, Runtime,
 };

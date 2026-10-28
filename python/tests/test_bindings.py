@@ -140,6 +140,19 @@ def test_links_actions_aggregation_batch_and_introspection() -> None:
     assert rt.explain(ts.query(Customer), context)["resource"] == "customer"
 
 
+def test_invoke_routes_through_the_catalog_and_refuses_retained_handles() -> None:
+    rt = runtime()
+    context = ctx()
+    catalog = rt.capabilities(context)
+    base = {"generation": catalog["generation"], "fingerprint": catalog["fingerprint"]}
+    created = rt.invoke(context, {**base, "capability": "customer.create", "input": {"values": {"id": "a", "score": 1, "active": True, "embedding": [0.0, 0.0, 0.0]}}})
+    assert "mutation" in created
+    read = rt.invoke(context, {**base, "capability": "customer.get", "input": {"key": "a"}})
+    assert "record" in read
+    with pytest.raises(ValueError, match="retain_results"):
+        rt.invoke(context, {**base, "capability": "customer.search", "input": {}, "retain_results": True})
+
+
 def test_invalid_declarations_fail_early() -> None:
     with pytest.raises(ValueError, match="effects"):
         @ts.action(returns=Customer)

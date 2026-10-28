@@ -286,6 +286,11 @@ class Runtime:
     def capabilities(self, context: Context, task: str = "") -> Mapping[str, Any]:
         return cast(Mapping[str, Any], self._native.capabilities(context._wire(), task))
 
+    def invoke(self, context: Context, invocation: Mapping[str, Any]) -> Mapping[str, Any]:
+        if invocation.get("retain_results"):
+            raise ValueError("retain_results is not available in the Python facade: handle records stay on the Rust side")
+        return cast(Mapping[str, Any], self._native.invoke(context._wire(), dict(invocation)))
+
     def schema(self) -> Schema:
         spec = self._native.spec()
         return Schema(tuple(spec.get("object_types", ())), tuple(spec.get("link_types", ())), tuple(spec.get("actions", ())))

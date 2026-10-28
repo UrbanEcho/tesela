@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tesela_backend::{BindingsBuilder, MemoryBackend, PolicyEngine};
-use tesela_core::{ApiName, DataType, Error, ExecutionContext, Principal, RiskLevel};
+use tesela_backend::{BindingsBuilder, DenyAllPolicy, MemoryBackend, PolicyEngine};
+use tesela_core::{ApiName, DataType, Error, ExecutionContext, Principal, RiskLevel, Value};
 use tesela_ir::{ObjectType, Property, Spec};
 
-use crate::capability::{Capability, CapabilityCatalog, ToolExposure};
-use crate::{AllowAllPolicy, Runtime};
+use crate::capability::{Capability, CapabilityCatalog, CapabilityInvocation, ToolExposure};
+use crate::{AllowAllPolicy, InvocationOutput, Runtime};
 
 fn name(value: &'static str) -> ApiName {
     ApiName::from(value)
@@ -60,6 +60,29 @@ fn find<'a>(catalog: &'a CapabilityCatalog, name: &str) -> &'a Capability {
         .iter()
         .find(|capability| capability.name == name)
         .expect("capability in catalog")
+}
+
+fn invocation(
+    catalog: &CapabilityCatalog,
+    capability: &str,
+    input: serde_json::Value,
+) -> CapabilityInvocation {
+    CapabilityInvocation {
+        generation: catalog.generation,
+        fingerprint: catalog.fingerprint.clone(),
+        capability: capability.to_string(),
+        input: Value::new(input),
+        expected_revision: None,
+        run_id: None,
+        retain_results: false,
+    }
+}
+
+fn create(runtime: &Runtime, catalog: &CapabilityCatalog, id: &str) -> Result<(), Error> {
+    let input = json!({"values": {"id": id, "tenant_id": "acme"}});
+    runtime
+        .invoke(&context(), invocation(catalog, "customer.create", input))
+        .map(|_| ())
 }
 
 #[test]
@@ -124,5 +147,114 @@ fn mutation_metadata_and_input_schemas_are_derived() -> Result<(), Error> {
     assert!(values["properties"].get("id").is_some());
     assert!(values["properties"].get("tenant_id").is_some());
     assert_eq!(values["additionalProperties"], json!(false));
+    Ok(())
+}
+
+#[test]
+fn denied_capabilities_are_hidden_and_not_invocable() -> Result<(), Error> {
+    let runtime = runtime_with(Arc::new(DenyAllPolicy))?;
+    let catalog = catalog_for(&runtime, "");
+    assert!(!catalog.capabilities.is_empty());
+    assert!(
+        catalog
+            .capabilities
+            .iter()
+            .all(|capability| capability.exposure == ToolExposure::Hidden)
+    );
+    let error = runtime
+        .invoke(
+            &context(),
+            invocation(&catalog, "customer.search", json!({})),
+        )
+        .expect_err("hidden capability is not invocable");
+    assert!(error.message().contains("customer.search"));
+    Ok(())
+}
+
+#[test]
+fn stale_invocations_name_both_generations() -> Result<(), Error> {
+    let runtime = runtime_with(Arc::new(AllowAllPolicy))?;
+    let catalog = catalog_for(&runtime, "");
+    let mut stale = invocation(&catalog, "customer.search", json!({}));
+    stale.generation += 1;
+    let error = runtime
+        .invoke(&context(), stale)
+        .expect_err("stale invocation is rejected");
+    assert!(error.message().contains(&catalog.generation.to_string()));
+    assert!(error.message().contains("Runtime::capabilities"));
+    Ok(())
+}
+
+#[test]
+fn invoke_routes_mutations_reads_and_searches() -> Result<(), Error> {
+    let runtime = runtime_with(Arc::new(AllowAllPolicy))?;
+    let catalog = catalog_for(&runtime, "");
+    let created = runtime.invoke(
+        &context(),
+        invocation(
+            &catalog,
+            "customer.create",
+            json!({"values": {"id": "one", "tenant_id": "acme"}}),
+        ),
+    )?;
+    let InvocationOutput::Mutation(result) = created.output else {
+        panic!("create returns a mutation result");
+    };
+    assert!(result.record.is_some());
+
+    let read = runtime.invoke(
+        &context(),
+        invocation(&catalog, "customer.get", json!({"key": "one"})),
+    )?;
+    assert!(matches!(read.output, InvocationOutput::Record(_)));
+
+    let searched = runtime.invoke(
+        &context(),
+        invocation(&catalog, "customer.search", json!({})),
+    )?;
+    let InvocationOutput::Page(page) = searched.output else {
+        panic!("search returns a page");
+    };
+    assert_eq!(page.records.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn retained_results_serialize_as_a_summary_only() -> Result<(), Error> {
+    let runtime = runtime_with(Arc::new(AllowAllPolicy))?;
+    let catalog = catalog_for(&runtime, "");
+    create(&runtime, &catalog, "one")?;
+    create(&runtime, &catalog, "two")?;
+    let mut retained = invocation(&catalog, "customer.search", json!({}));
+    retained.retain_results = true;
+    let output = runtime.invoke(&context(), retained)?.output;
+    let summary = serde_json::to_value(&output).expect("summary serializes");
+    assert_eq!(summary["handle"]["handle"]["count"], json!(2));
+    assert!(!summary.to_string().contains("acme"));
+    Ok(())
+}
+
+#[test]
+fn retain_results_is_rejected_for_reads_and_mutations() -> Result<(), Error> {
+    let runtime = runtime_with(Arc::new(AllowAllPolicy))?;
+    let catalog = catalog_for(&runtime, "");
+    let mut read = invocation(&catalog, "customer.get", json!({"key": "one"}));
+    read.retain_results = true;
+    let error = runtime.invoke(&context(), read).expect_err("rejected");
+    assert!(error.message().contains("retain_results"));
+    Ok(())
+}
+
+#[test]
+fn revisioned_mutations_require_an_expected_revision() -> Result<(), Error> {
+    let runtime = runtime_with(Arc::new(AllowAllPolicy))?;
+    let catalog = catalog_for(&runtime, "");
+    let update = invocation(
+        &catalog,
+        "customer.update",
+        json!({"primary_key": "one", "values": {"tenant_id": "beta"}}),
+    );
+    let error = runtime.invoke(&context(), update).expect_err("rejected");
+    assert!(error.message().contains("requires expected_revision"));
     Ok(())
 }

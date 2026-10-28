@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde::{Serialize, Serializer};
 use tesela_core::{ApiName, Error, ExecutionContext, Key};
 use tesela_ir::Record;
 
@@ -12,6 +13,17 @@ pub struct ResultHandle {
     id: Arc<str>,
     request_id: Arc<str>,
     records: Arc<[Record]>,
+}
+
+/// Serializes as a summary (`id` and `count`) so records never enter model context.
+impl Serialize for ResultHandle {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ResultHandle", 2)?;
+        state.serialize_field("id", self.id())?;
+        state.serialize_field("count", &self.records.len())?;
+        state.end()
+    }
 }
 
 impl ResultHandle {

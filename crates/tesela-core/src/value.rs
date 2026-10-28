@@ -295,6 +295,7 @@ impl std::hash::Hash for Value {
             serde_json::Value::String(s) => s.hash(state),
             serde_json::Value::Array(arr) => arr.hash(state),
             serde_json::Value::Object(map) => {
+                map.len().hash(state);
                 for (k, v) in map.iter() {
                     k.hash(state);
                     v.hash(state);

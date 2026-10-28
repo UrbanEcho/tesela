@@ -330,9 +330,16 @@ ontology
 + task relevance
 ```
 
-The resulting catalog describes what a caller can actually do rather than merely listing every operation that exists.
+The resulting catalog describes what a caller can actually do rather than merely listing every operation that exists. Each capability carries:
 
-Capability catalogs and invocations carry the ontology fingerprint and generation so calls against stale semantic state fail explicitly.
+- `input_schema`: a JSON Schema derived from the object's properties, so tool-calling models get real argument shapes.
+- `annotations`: MCP-style hints (`read_only`, `destructive`, `idempotent`, `open_world`) derived from action effects and mutation risk.
+- `risk`, `approval_required`, `requires_revision` and `preconditions`, so callers can see what a call will need before making it.
+- `exposure`: `direct`, `discoverable`, `program_only` or `hidden`. Exposure is decided by whole-token matching of the task against the resource and operation verbs, so `customers` does not promote `customer`. Denied capabilities are always `hidden`.
+
+Invoke a capability with `Runtime::invoke` (Rust) or `Runtime.invoke` (Python). Invocations route to the same checked paths as typed plans, so policy, authority, approvals and revision checks still apply. Results come back inline, or as a bounded, execution-scoped handle that exposes only an id and count.
+
+Catalogs and invocations carry the ontology fingerprint and generation. A stale invocation fails with a message that names both generations and says to fetch the catalog again with `Runtime::capabilities`.
 
 This allows ordinary application code and agent tooling to share the same underlying authority and execution model.
 

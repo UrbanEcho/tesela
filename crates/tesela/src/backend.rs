@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::error::Error;
+use crate::lazy::LazyAccess;
 use crate::model::{Object, encode_key};
 use crate::raw::{
     self, ApiName, Backend as RawBackend, BackendCapabilities, ExecutionContext, Key,
@@ -193,7 +194,20 @@ impl<T: Object> RawBackend for RepositoryAdapter<T> {
             .scan
             .as_ref()
             .ok_or_else(|| Error::unsupported("scan"))?(context)?;
-        raw::execute_residual_try_owned(values.map(record_from_object), query)
+        let access = LazyAccess::<T>::new();
+        let page = raw::execute_rows(&access, values.map(|object| Ok(access.row(object))), query);
+        if let Some(error) = access.take_failure() {
+            return Err(error);
+        }
+        let page = page?;
+        Ok(RawPage {
+            records: page
+                .rows
+                .into_iter()
+                .map(|row| record_from_object(row.object))
+                .collect::<Result<_, _>>()?,
+            next_cursor: page.next_cursor,
+        })
     }
     fn get(
         &self,

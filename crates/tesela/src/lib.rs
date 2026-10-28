@@ -15,6 +15,7 @@ pub mod __private {
 
 pub mod backend;
 pub mod error;
+mod lazy;
 pub mod model;
 pub mod plan;
 pub mod policy;

@@ -324,6 +324,20 @@ impl<T: Object, B: Native<T> + 'static> ObjectBinding<T> for NativeBackend<T, B>
     }
 }
 
+impl<T: Object, B: Native<T>> NativeAdapter<T, B> {
+    fn search_all(&self, context: &ExecutionContext, query: &RawQuery) -> Result<RawPage, Error> {
+        Ok(RawPage {
+            records: self
+                .backend
+                .search(context, query)?
+                .into_iter()
+                .map(record_from_object)
+                .collect::<Result<_, _>>()?,
+            next_cursor: None,
+        })
+    }
+}
+
 impl<T: Object, B: Native<T>> RawBackend for NativeAdapter<T, B> {
     fn backend_type(&self) -> &str {
         self.backend.backend_type()
@@ -341,14 +355,38 @@ impl<T: Object, B: Native<T>> RawBackend for NativeAdapter<T, B> {
         _object: &ApiName,
         query: &RawQuery,
     ) -> Result<RawPage, Error> {
+        let Some(limit) = query.limit.map(|limit| usize::try_from(limit).unwrap_or(0)) else {
+            return self.search_all(context, query);
+        };
+        let offset = query
+            .cursor
+            .as_deref()
+            .and_then(|cursor| cursor.parse::<usize>().ok())
+            .or_else(|| {
+                query
+                    .offset
+                    .map(|offset| usize::try_from(offset).unwrap_or(0))
+            })
+            .unwrap_or_default();
+        // One extra row tells whether another page exists.
+        let window = RawQuery {
+            filter: query.filter.clone(),
+            sort: query.sort.clone(),
+            limit: Some(i32::try_from(limit.saturating_add(1)).unwrap_or(i32::MAX)),
+            offset: Some(i32::try_from(offset).unwrap_or(i32::MAX)),
+            cursor: None,
+        };
+        let mut records = self
+            .backend
+            .search(context, &window)?
+            .into_iter()
+            .map(record_from_object)
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = records.len() > limit;
+        records.truncate(limit);
         Ok(RawPage {
-            records: self
-                .backend
-                .search(context, query)?
-                .into_iter()
-                .map(record_from_object)
-                .collect::<Result<_, _>>()?,
-            next_cursor: None,
+            records,
+            next_cursor: has_more.then(|| offset.saturating_add(limit).to_string()),
         })
     }
     fn aggregate(

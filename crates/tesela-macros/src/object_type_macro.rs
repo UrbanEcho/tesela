@@ -58,6 +58,7 @@ fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
     let mut encoders = Vec::new();
     let mut decoders = Vec::new();
     let mut initializers = Vec::new();
+    let mut lazy_fields = Vec::new();
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
         let field_name = ident.to_string();
@@ -75,7 +76,10 @@ fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
         };
         properties.push(quote! { ::tesela::__private::Property { api_name: ::tesela::__private::ApiName::new_unchecked(#field_name), display: None, description: #description, data_type: #data_type, nullable: if #nullable { Some(true) } else { None }, default: None, allowed_values: None, tags: Vec::new() } });
         accessors.push(quote! { #[must_use] pub const fn #ident() -> ::tesela::Field<Self, #ty> { ::tesela::Field::new(#field_name) } });
-        encoders.push(quote! { values.insert(::tesela::__private::ApiName::new_unchecked(#field_name), ::tesela::model::encode_value(&self.#ident)?); });
+        encoders.push(quote! { let name = { static NAME: ::std::sync::OnceLock<::tesela::__private::ApiName> = ::std::sync::OnceLock::new(); ::tesela::model::cached_name(&NAME, #field_name) }; values.insert(name, ::tesela::model::encode_value(&self.#ident)?); });
+        lazy_fields.push(
+            quote! { #field_name => Ok(Some(::tesela::model::encode_value(&self.#ident)?)), },
+        );
         decoders.push(quote! { let #ident: #ty = ::tesela::model::decode_value(record.values.remove(#field_name), #field_name)?; });
         initializers.push(quote!(#ident));
     }
@@ -84,6 +88,13 @@ fn expand_checked(input: DeriveInput) -> syn::Result<TokenStream2> {
             type Key = #key_type;
             fn definition() -> ::tesela::__private::ObjectType {
                 ::tesela::__private::ObjectType { api_name: ::tesela::__private::ApiName::new_unchecked(#api_name), display: #display, description: #description, primary_key: ::tesela::__private::ApiName::new_unchecked(#key_name), properties: vec![#(#properties),*], traits: Vec::new(), tags: Vec::new(), deprecated_at: None }
+            }
+            fn api_name() -> ::tesela::__private::ApiName {
+                static NAME: ::std::sync::OnceLock<::tesela::__private::ApiName> = ::std::sync::OnceLock::new();
+                ::tesela::model::cached_name(&NAME, #api_name)
+            }
+            fn encode_field(&self, name: &::tesela::__private::ApiName) -> Result<Option<::tesela::__private::Value>, ::tesela::Error> {
+                match name.as_str() { #(#lazy_fields)* _ => Ok(None) }
             }
             fn key(&self) -> Result<Self::Key, ::tesela::Error> { Ok(self.#key.clone()) }
             fn encode(&self) -> Result<std::collections::BTreeMap<::tesela::__private::ApiName, ::tesela::__private::Value>, ::tesela::Error> { let mut values = std::collections::BTreeMap::new(); #(#encoders)* Ok(values) }

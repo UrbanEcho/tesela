@@ -25,6 +25,15 @@ pub trait Object: Sized + Send + Sync + 'static {
     fn api_name() -> ApiName {
         Self::definition().api_name
     }
+    /// Encode one field without encoding the whole value.
+    ///
+    /// Lets a scan evaluate a filter against the fields it names and encode
+    /// only the rows it returns. `#[derive(Object)]` generates a direct
+    /// implementation; the default encodes everything.
+    #[doc(hidden)]
+    fn encode_field(&self, name: &ApiName) -> Result<Option<Value>, Error> {
+        Ok(self.encode()?.remove(name))
+    }
 }
 
 /// A typed semantic relationship.
@@ -153,6 +162,12 @@ impl<O, T> Field<O, T> {
     pub fn name(self) -> ApiName {
         ApiName::new_unchecked(self.name)
     }
+}
+
+/// Build a name once per call site and share it afterwards.
+#[doc(hidden)]
+pub fn cached_name(cell: &std::sync::OnceLock<ApiName>, name: &str) -> ApiName {
+    cell.get_or_init(|| ApiName::new_unchecked(name)).clone()
 }
 
 #[doc(hidden)]

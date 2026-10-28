@@ -23,8 +23,11 @@ Execution validates context state and the plan before invoking policy or a backe
 
 - Records cross the engine boundary as typed scalar values and field maps; public objects are encoded and decoded once per boundary crossing.
 - Repository scans are consumed incrementally. Unsorted pagination retains at most `limit + 1` result records; sorted pagination retains bounded top-k state.
-- Residual aggregation retains group state, not group rows.
-- Filter fields resolve during compilation. Membership uses hash lookup and `LIKE` uses a compiled pattern.
+- Residual aggregation retains group state, not group rows. Groups are found by hashing borrowed values, so a row that joins an existing group allocates nothing.
+- Filter fields resolve during compilation. Membership uses a compiled key set, `LIKE` uses a compiled pattern, and comparisons read stored values in place instead of projecting them to keys.
+- One residual engine is generic over how rows expose fields. Borrowed records, owned records, dense backend rows, and lazily encoded repository objects all share it, so a repository scan encodes only the fields a query reads and only the rows it returns.
+- The in-memory backend keeps one lock and one dense, dictionary-interned table per object type, so writes to different types never contend. Batches apply through an undo log instead of copying tables, and link traversal reads a write-maintained index.
+- Byte-budget accounting measures payloads only when a byte limit is set.
 - Native search and aggregate pushdown are selected only from advertised capabilities.
 - Optional lookup is distinct from error-producing raw get.
 - Immutable snapshots make concurrent reads independent of schema publication.

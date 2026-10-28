@@ -206,3 +206,84 @@ fn a_field_reads_its_value_by_name() {
     );
 }
 use super::*;
+
+#[test]
+fn evaluation_agrees_with_projecting_every_value_to_a_key() {
+    let operands = [
+        Value::string("beta"),
+        Value::string(""),
+        Value::integer(3),
+        Value::float(2.5),
+        Value::bool(true),
+    ];
+    let stored = [
+        Some(Value::string("alpha")),
+        Some(Value::string("beta")),
+        Some(Value::integer(3)),
+        Some(Value::integer(-9)),
+        Some(Value::float(2.5)),
+        Some(Value::bool(true)),
+        Some(Value::null()),
+        None,
+    ];
+    let members: Vec<_> = (0..12)
+        .map(|index| Value::string(format!("m{index}")))
+        .collect();
+    let mut wide = members.clone();
+    wide.push(Value::string("beta"));
+    for field in ["name", "revenue"] {
+        for operand in &operands {
+            let key = Key::from(operand);
+            let cases = [
+                (FilterOp::Eq, Ordering::is_eq as fn(Ordering) -> bool),
+                (FilterOp::Lt, Ordering::is_lt),
+                (FilterOp::Gte, Ordering::is_ge),
+            ];
+            for (op, test) in cases {
+                let filter = Filter {
+                    op,
+                    field: Some(ApiName::from(field)),
+                    value: Some(operand.clone()),
+                    values: Vec::new(),
+                    args: Vec::new(),
+                };
+                let Ok(compiled) = compile(&filter) else {
+                    continue;
+                };
+                for value in &stored {
+                    let row: BTreeMap<_, _> = value
+                        .iter()
+                        .map(|value| (ApiName::from(field), value.clone()))
+                        .collect();
+                    let expected = value
+                        .as_ref()
+                        .is_some_and(|value| test(Key::from(value).cmp(&key)));
+                    assert_eq!(compiled.matches(&row), expected, "{filter:?} on {value:?}");
+                }
+            }
+        }
+        for set in [
+            wide.clone(),
+            vec![Value::string("beta"), Value::string("zeta")],
+        ] {
+            let keys: Vec<_> = set.iter().map(Key::from).collect();
+            let Ok(compiled) = compile(&Filter::is_in(ApiName::from(field), set.clone())) else {
+                continue;
+            };
+            let negated = compile(&Filter::negate(Filter::is_in(ApiName::from(field), set))).ok();
+            for value in &stored {
+                let row: BTreeMap<_, _> = value
+                    .iter()
+                    .map(|value| (ApiName::from(field), value.clone()))
+                    .collect();
+                let expected = value
+                    .as_ref()
+                    .is_some_and(|value| keys.contains(&Key::from(value)));
+                assert_eq!(compiled.matches(&row), expected, "In on {value:?}");
+                if let Some(negated) = &negated {
+                    assert_eq!(negated.matches(&row), !expected, "Not In on {value:?}");
+                }
+            }
+        }
+    }
+}

@@ -1,10 +1,10 @@
 //! Compilation of the filter AST into an executable predicate.
 
-use std::collections::HashSet;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use tesela_core::like::LikePlan;
-use tesela_core::{ApiName, DataType, Error, FilterOp, Key, Value};
+use tesela_core::{ApiName, DataType, Error, FilterOp, Key, KeySet, Value};
 use tesela_ir::Filter;
 
 use super::CompiledObjectType;
@@ -89,9 +89,9 @@ pub enum CompiledFilter {
     /// Greater than or equal.
     Gte(FieldRef, Key),
     /// Membership.
-    In(FieldRef, Arc<HashSet<Key>>),
+    In(FieldRef, Arc<KeySet>),
     /// Non-membership.
-    NotIn(FieldRef, Arc<HashSet<Key>>),
+    NotIn(FieldRef, Arc<KeySet>),
     /// Inclusive range.
     Between(FieldRef, Key, Key),
     /// Substring containment.
@@ -105,29 +105,37 @@ pub enum CompiledFilter {
 }
 
 impl CompiledFilter {
-    /// Evaluate the closed predicate without allocation or failure.
+    /// Evaluate the closed predicate without failure or per-row allocation.
     #[must_use]
     pub fn matches(&self, values: &std::collections::BTreeMap<ApiName, Value>) -> bool {
-        let value = |field: &FieldRef| field.value_of(values).map(Key::from);
+        // Order of the stored value relative to the compiled operand, compared
+        // in place so a scanned row never allocates a projected key.
+        let order = |field: &FieldRef, expected: &Key| {
+            field
+                .value_of(values)
+                .map(|item| expected.cmp_value(item).reverse())
+        };
         match self {
             Self::And(items) => items.iter().all(|item| item.matches(values)),
             Self::Or(items) => items.iter().any(|item| item.matches(values)),
             Self::Not(item) => !item.matches(values),
             Self::IsNull(field) => field.value_of(values).is_none_or(Value::is_null),
             Self::IsNotNull(field) => field.value_of(values).is_some_and(|item| !item.is_null()),
-            Self::Eq(field, expected) => value(field).as_ref() == Some(expected),
-            Self::Ne(field, expected) => value(field).as_ref() != Some(expected),
-            Self::Lt(field, expected) => value(field).is_some_and(|item| item < *expected),
-            Self::Lte(field, expected) => value(field).is_some_and(|item| item <= *expected),
-            Self::Gt(field, expected) => value(field).is_some_and(|item| item > *expected),
-            Self::Gte(field, expected) => value(field).is_some_and(|item| item >= *expected),
-            Self::In(field, expected) => value(field).is_some_and(|item| expected.contains(&item)),
-            Self::NotIn(field, expected) => {
-                value(field).is_none_or(|item| !expected.contains(&item))
-            }
-            Self::Between(field, low, high) => {
-                value(field).is_some_and(|item| item >= *low && item <= *high)
-            }
+            Self::Eq(field, expected) => order(field, expected) == Some(Ordering::Equal),
+            Self::Ne(field, expected) => order(field, expected) != Some(Ordering::Equal),
+            Self::Lt(field, expected) => order(field, expected) == Some(Ordering::Less),
+            Self::Lte(field, expected) => order(field, expected).is_some_and(Ordering::is_le),
+            Self::Gt(field, expected) => order(field, expected) == Some(Ordering::Greater),
+            Self::Gte(field, expected) => order(field, expected).is_some_and(Ordering::is_ge),
+            Self::In(field, expected) => field
+                .value_of(values)
+                .is_some_and(|item| expected.contains_value(item)),
+            Self::NotIn(field, expected) => field
+                .value_of(values)
+                .is_none_or(|item| !expected.contains_value(item)),
+            Self::Between(field, low, high) => field
+                .value_of(values)
+                .is_some_and(|item| low.cmp_value(item).is_le() && high.cmp_value(item).is_ge()),
             Self::Contains(field, expected) => field
                 .value_of(values)
                 .and_then(Value::as_str)
@@ -401,7 +409,7 @@ impl Operation {
                 _ => CompiledFilter::Gte(field, key),
             },
             Self::Many(field, keys) => {
-                let set: Arc<HashSet<Key>> = Arc::new(keys.into_iter().collect());
+                let set: Arc<KeySet> = Arc::new(keys.into_iter().collect());
                 match op {
                     FilterOp::NotIn => CompiledFilter::NotIn(field, set),
                     _ => CompiledFilter::In(field, set),

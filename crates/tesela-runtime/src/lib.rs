@@ -11,6 +11,8 @@ pub mod compile;
 mod policy;
 mod runtime;
 #[cfg(test)]
+mod runtime_capability_tests;
+#[cfg(test)]
 mod runtime_tests;
 
 pub use policy::AllowAllPolicy;

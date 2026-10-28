@@ -12,3 +12,6 @@ tesela-core = { workspace = true }
 tesela-ir = { workspace = true }
 serde = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+

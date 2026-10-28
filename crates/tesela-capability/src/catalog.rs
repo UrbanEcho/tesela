@@ -1,4 +1,4 @@
-//! Versioned capability catalogs and invocation identity.
+//! Versioned capability catalogs, their projection vocabulary, and invocation identity.
 
 use serde::{Deserialize, Serialize};
 use tesela_core::{Operation, RiskLevel, Value};
@@ -18,6 +18,19 @@ pub enum ToolExposure {
     Hidden,
 }
 
+/// Behavioral hints a host may use to decide how to present a capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAnnotations {
+    /// The operation reads without writing or calling external systems.
+    pub read_only: bool,
+    /// The operation writes and carries high risk.
+    pub destructive: bool,
+    /// Repeating the same invocation is declared safe.
+    pub idempotent: bool,
+    /// The operation reaches systems outside the ontology's own data.
+    pub open_world: bool,
+}
+
 /// One ontology-derived operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {
@@ -33,12 +46,12 @@ pub struct Capability {
     pub input_schema: Value,
     /// Declared action effects; read capabilities use `read_only`.
     pub effects: ActionEffects,
+    /// Behavioral hints derived from effects, risk, and idempotency.
+    pub annotations: CapabilityAnnotations,
     /// Explicit approval requirement.
     pub approval_required: bool,
     /// Static action risk.
     pub risk: RiskLevel,
-    /// Whether repeating the same invocation is declared safe.
-    pub idempotent: bool,
     /// Host concurrency contract for actions.
     pub concurrency: Option<Concurrency>,
     /// Whether a subject revision must accompany the call.
@@ -58,25 +71,41 @@ pub struct CapabilityCatalog {
     pub capabilities: Vec<Capability>,
 }
 
+/// Split free text into lowercase ASCII alphanumeric tokens.
+#[must_use]
+pub fn tokenize(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Whether `phrase` appears as a contiguous run of whole tokens inside `tokens`.
+#[must_use]
+pub fn contains_phrase(tokens: &[String], phrase: &[String]) -> bool {
+    !phrase.is_empty() && tokens.windows(phrase.len()).any(|window| window == phrase)
+}
+
 impl CapabilityCatalog {
     /// Search discoverable capabilities. Exact and qualified names always rank first.
+    ///
+    /// Matching is by whole token, so `cust` does not match `customer`.
     #[must_use]
     pub fn search(&self, query: &str, limit: usize) -> Vec<&Capability> {
-        let query = query.to_ascii_lowercase();
-        let terms: Vec<&str> = query
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .filter(|term| !term.is_empty())
-            .collect();
+        let query_name = query.to_ascii_lowercase();
+        let terms = tokenize(query);
         let mut scored: Vec<_> = self
             .capabilities
             .iter()
             .filter(|capability| capability.exposure != ToolExposure::Hidden)
             .map(|capability| {
                 let name = capability.name.to_ascii_lowercase();
-                let text = format!("{name} {}", capability.description.to_ascii_lowercase());
-                let exact =
-                    usize::from(name == query || name.rsplit('.').next() == Some(query.as_str()));
-                let lexical: usize = terms.iter().map(|term| text.matches(term).count()).sum();
+                let exact = usize::from(
+                    name == query_name || name.rsplit('.').next() == Some(query_name.as_str()),
+                );
+                let mut tokens = tokenize(&capability.name);
+                tokens.extend(tokenize(&capability.description));
+                let lexical = terms.iter().filter(|term| tokens.contains(term)).count();
                 (exact, lexical, capability)
             })
             .filter(|(exact, lexical, _)| *exact > 0 || *lexical > 0)
@@ -96,15 +125,16 @@ impl CapabilityCatalog {
     }
 }
 
-/// Invocation identity used to reject stale calls.
+/// One call against a capability, carrying the catalog identity it was issued under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
     /// Catalog generation presented to the caller.
     pub generation: u64,
     /// Catalog fingerprint presented to the caller.
     pub fingerprint: SemanticFingerprint,
-    /// Selected capability.
+    /// Selected capability, by qualified name.
     pub capability: String,
-    /// Input payload.
+    /// Input payload, shaped by the capability's `input_schema`.
+    #[serde(default)]
     pub input: Value,
 }

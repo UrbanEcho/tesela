@@ -1,9 +1,15 @@
 use std::collections::BTreeMap;
 
-use tesela_core::{ApiName, DataType, ExecutionBudget, ExecutionContext, Key, Principal, Value};
-use tesela_ir::{ObjectType, Property, Record, Spec};
+use tesela_core::{
+    ApiName, DataType, ExecutionBudget, ExecutionContext, Key, Operation, Principal, RiskLevel,
+    Value,
+};
+use tesela_ir::{ActionEffects, ObjectType, Property, Record, Spec};
 
-use super::*;
+use crate::{
+    Capability, CapabilityAnnotations, CapabilityCatalog, DiffImpact, ResultHandle, ToolExposure,
+    contains_phrase, semantic_diff, tokenize,
+};
 
 fn object(name: &'static str) -> ObjectType {
     ObjectType {
@@ -24,6 +30,36 @@ fn object(name: &'static str) -> ObjectType {
         traits: Vec::new(),
         tags: Vec::new(),
         deprecated_at: None,
+    }
+}
+
+fn capability(name: &str, description: &str, exposure: ToolExposure) -> Capability {
+    Capability {
+        name: name.to_string(),
+        description: description.to_string(),
+        operation: Operation::Search,
+        exposure,
+        input_schema: Value::new(serde_json::json!({"type": "object"})),
+        effects: ActionEffects::read_only(),
+        annotations: CapabilityAnnotations {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: false,
+        },
+        approval_required: false,
+        risk: RiskLevel::Low,
+        concurrency: None,
+        requires_revision: false,
+        preconditions: Vec::new(),
+    }
+}
+
+fn catalog(capabilities: Vec<Capability>) -> CapabilityCatalog {
+    CapabilityCatalog {
+        generation: 1,
+        fingerprint: Spec::default().fingerprint().expect("fingerprint"),
+        capabilities,
     }
 }
 
@@ -65,4 +101,56 @@ fn result_handles_are_bounded_and_execution_scoped() {
     let other =
         ExecutionContext::trusted(Principal::new("agent"), "request-b").expect("other context");
     assert!(handle.page(&other, 0, 1).is_err());
+}
+
+#[test]
+fn tokens_split_on_punctuation_and_lowercase() {
+    assert_eq!(
+        tokenize("Customer_Orders.search"),
+        ["customer", "orders", "search"]
+    );
+    assert!(contains_phrase(
+        &tokenize("list customer orders today"),
+        &tokenize("customer_orders"),
+    ));
+    assert!(!contains_phrase(
+        &tokenize("orders customer"),
+        &tokenize("customer orders")
+    ));
+    assert!(!contains_phrase(&tokenize("anything"), &[]));
+}
+
+#[test]
+fn search_matches_whole_tokens_not_substrings() {
+    let catalog = catalog(vec![capability(
+        "customer.search",
+        "search customer objects",
+        ToolExposure::Discoverable,
+    )]);
+    assert!(catalog.search("cust", 5).is_empty());
+    assert_eq!(catalog.search("customer", 5)[0].name, "customer.search");
+}
+
+#[test]
+fn search_ranks_exact_names_first_and_skips_hidden() {
+    let catalog = catalog(vec![
+        capability(
+            "order.search",
+            "search order objects",
+            ToolExposure::Discoverable,
+        ),
+        capability(
+            "customer.search",
+            "search customer objects",
+            ToolExposure::Discoverable,
+        ),
+        capability(
+            "secret.search",
+            "search secret objects",
+            ToolExposure::Hidden,
+        ),
+    ]);
+    let found = catalog.search("customer.search", 5);
+    assert_eq!(found[0].name, "customer.search");
+    assert!(catalog.search("secret", 5).is_empty());
 }

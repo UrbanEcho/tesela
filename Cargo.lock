@@ -693,6 +693,7 @@ name = "tesela-capability"
 version = "0.2.0"
 dependencies = [
  "serde",
+ "serde_json",
  "tesela-core",
  "tesela-ir",
 ]

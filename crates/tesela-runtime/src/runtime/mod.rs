@@ -269,6 +269,8 @@ mod actions;
 mod aggregate;
 mod auth;
 mod data;
+mod project;
+mod schema;
 mod support;
 
 use support::*;

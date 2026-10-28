@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use tesela_backend::{
-    AggregateQuery, Aggregation, AggregationFunction, Backend, MemoryBackend, Query, Sort,
-    SortDirection,
+    AggregateQuery, Aggregation, AggregationFunction, Backend, LinkResolver, MemoryBackend,
+    Mutation, Query, Sort, SortDirection,
 };
 use tesela_core::{ApiName, Error, ExecutionContext, FilterOp, Key, Principal, Value};
 use tesela_ir::Filter;
@@ -230,9 +230,92 @@ fn bench_aggregate(criterion: &mut Criterion) -> Result<(), Error> {
     Ok(())
 }
 
+fn customer_values(index: usize, revenue: f64) -> BTreeMap<ApiName, Value> {
+    BTreeMap::from([
+        (name("id"), Value::string(format!("customer_{index:06}"))),
+        (name("tenant_id"), Value::string(tenant(index))),
+        (name("revenue"), Value::float(revenue)),
+    ])
+}
+
+/// An atomic batch pays for its undo log, so it is measured against the rows
+/// it rewrites rather than the table size.
+fn bench_batch(criterion: &mut Criterion) -> Result<(), Error> {
+    let customer = name("customer");
+    let key = name("id");
+    let context = context();
+    let mut group = criterion.benchmark_group("memory_batch");
+    group.sample_size(30);
+    let backend = build_backend(SIZES[0])?;
+    for width in [10_usize, 100, 1_000] {
+        let mutations: Vec<Mutation> = (0..width)
+            .map(|index| Mutation::Upsert {
+                values: customer_values(index, index as f64),
+                expected_revision: None,
+                preconditions: Vec::new(),
+            })
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("upsert_existing", width),
+            &mutations,
+            |bencher, mutations| {
+                bencher.iter(|| {
+                    backend.batch(
+                        black_box(&context),
+                        black_box(&customer),
+                        black_box(&key),
+                        black_box(mutations),
+                    )
+                });
+            },
+        );
+    }
+    group.finish();
+    Ok(())
+}
+
+/// Link traversal reads a write-maintained index, so it should not scan the
+/// target table once the index exists.
+fn bench_traverse(criterion: &mut Criterion) -> Result<(), Error> {
+    let order = name("order");
+    let link = name("orders");
+    let context = context();
+    let mut group = criterion.benchmark_group("memory_traverse");
+    group.sample_size(30);
+    for rows in SIZES {
+        let backend = MemoryBackend::new();
+        backend.bind_link(link.clone(), name("customer_id"));
+        for index in 0..rows {
+            let values = BTreeMap::from([
+                (name("id"), Value::integer(index as i64)),
+                (
+                    name("customer_id"),
+                    Value::string(format!("c{}", index % 500)),
+                ),
+            ]);
+            backend.create(&context, &order, Key::I64(index as i64), values)?;
+        }
+        let source = Key::string("c42");
+        group.bench_function(BenchmarkId::new("linked_keys", rows), |bencher| {
+            bencher.iter(|| {
+                backend.linked_keys(
+                    black_box(&context),
+                    black_box(&link),
+                    black_box(&order),
+                    black_box(&source),
+                )
+            });
+        });
+    }
+    group.finish();
+    Ok(())
+}
+
 fn benches(criterion: &mut Criterion) {
     bench_search(criterion).expect("benchmark setup failed");
     bench_aggregate(criterion).expect("benchmark setup failed");
+    bench_batch(criterion).expect("benchmark setup failed");
+    bench_traverse(criterion).expect("benchmark setup failed");
 }
 
 criterion_group!(memory, benches);

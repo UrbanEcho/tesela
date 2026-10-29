@@ -5,7 +5,9 @@ use tesela_ir::ActionEffects;
 
 use crate::capability::{CapabilityAnnotations, contains_phrase, tokenize};
 
-use super::schema::{action_schema, get_schema, mutation_schema, search_schema, traverse_schema};
+use super::schema::{
+    action_schema, aggregate_schema, get_schema, mutation_schema, search_schema, traverse_schema,
+};
 use super::*;
 
 /// Per-suffix mutation metadata. Risk, idempotency and revision needs are
@@ -50,6 +52,15 @@ const MUTATIONS: [MutationProfile; 4] = [
 ];
 
 const SEARCH_VERBS: &[&str] = &["search", "list", "find", "query"];
+const AGGREGATE_VERBS: &[&str] = &[
+    "aggregate",
+    "count",
+    "sum",
+    "average",
+    "total",
+    "group",
+    "stats",
+];
 const GET_VERBS: &[&str] = &["get", "read", "fetch", "show", "lookup"];
 const TRAVERSE_VERBS: &[&str] = &["traverse", "follow", "related", "linked"];
 
@@ -120,6 +131,14 @@ impl Runtime {
                     backend.is_some_and(|item| item.capabilities().get),
                     GET_VERBS,
                 ),
+                (
+                    "aggregate",
+                    Operation::Aggregate,
+                    backend.is_some_and(|item| {
+                        item.capabilities().aggregate || item.capabilities().search
+                    }),
+                    AGGREGATE_VERBS,
+                ),
             ] {
                 let name = format!("{resource}.{suffix}");
                 let decision = supported
@@ -134,7 +153,8 @@ impl Runtime {
                     idempotent: true,
                 };
                 let input_schema = match suffix {
-                    "search" => search_schema(),
+                    "search" => search_schema(object),
+                    "aggregate" => aggregate_schema(object),
                     _ => get_schema(object),
                 };
                 let exposure = exposure(
@@ -305,6 +325,14 @@ impl Runtime {
                 requires_revision: action.requires_revision(),
                 preconditions: action.preconditions().to_vec(),
             });
+        }
+        // Handles only exist for a principal that can retain results, so a
+        // principal with nothing visible sees no handle capabilities either.
+        if capabilities
+            .iter()
+            .any(|capability| capability.exposure != ToolExposure::Hidden)
+        {
+            capabilities.extend(super::results::handle_capabilities());
         }
         Ok(CapabilityCatalog {
             generation: snapshot.ontology.generation(),

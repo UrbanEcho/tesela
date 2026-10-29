@@ -27,10 +27,15 @@ impl Runtime {
         check_query(object_type, &query)?;
         let backend = object_backend(&snapshot, object_type)?;
         context.charge_backend_call()?;
-        let mut page = backend.search(context, object, &query)?;
+        let mut page = self.search_guarded(context, backend.as_ref(), object, &query)?;
         redact(&mut page.records, &decision.redactions);
         context.charge_rows(page.records.len() as u64)?;
         charge_bytes_with(context, || records_bytes(&page.records))?;
+        project_fields(
+            &mut page.records,
+            query.fields.as_deref(),
+            object_type.primary_key().api_name(),
+        );
         Ok(self.finish(
             context,
             &snapshot,
@@ -84,6 +89,14 @@ impl Runtime {
         } else {
             backend.get(context, object, key)?
         };
+        if let Some(found) = &record
+            && self.guards(context, object)
+            && !self.policy.admit_record(context, object, found)?
+        {
+            return Err(Error::policy_denied(
+                "record is outside the permitted access scope",
+            ));
+        }
         if let Some(record) = record.as_mut() {
             redact(std::slice::from_mut(record), &decision.redactions);
             context.charge_rows(1)?;

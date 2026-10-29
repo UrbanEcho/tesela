@@ -129,6 +129,7 @@ mod tests {
                 limit: Some(500),
                 offset: Some(3),
                 cursor: None,
+                fields: None,
             },
             100,
         )

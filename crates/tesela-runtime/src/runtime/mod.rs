@@ -152,6 +152,7 @@ impl RuntimeBuilder {
             policy: self.policy,
             observers: self.observers.into(),
             max_query_limit: self.max_query_limit,
+            handles: results::HandleStore::default(),
         }))
     }
 }
@@ -224,6 +225,7 @@ pub struct Runtime {
     policy: Arc<dyn PolicyEngine>,
     observers: Arc<[Arc<dyn ExecutionObserver>]>,
     max_query_limit: usize,
+    handles: results::HandleStore,
 }
 
 impl Runtime {
@@ -269,10 +271,14 @@ mod actions;
 mod aggregate;
 mod auth;
 mod data;
+mod guard;
 mod invoke;
+mod program;
 mod project;
+mod results;
 mod schema;
 mod support;
 
 pub use invoke::InvocationOutput;
+pub use program::{ProgramOutput, StepReport};
 use support::*;

@@ -37,3 +37,20 @@ fn display_surfaces_an_unknown_side_effect() {
     let error = Error::adapter("write failed").with_side_effect(SideEffectStatus::Unknown);
     assert!(error.to_string().contains("side effects unknown"));
 }
+
+#[test]
+fn model_report_hides_internal_detail_and_flags_unknown_writes() {
+    let internal = Error::internal("pool poisoned at 0xdead").model_report();
+    assert_eq!(internal.code, "internal");
+    assert!(!internal.message.contains("0xdead"));
+
+    let unknown = Error::transient("connection reset")
+        .with_side_effect(SideEffectStatus::Unknown)
+        .model_report();
+    assert!(!unknown.retryable);
+    assert!(unknown.hint.contains("Read the record back"));
+
+    let denied = Error::policy_denied("no access").model_report();
+    assert!(!denied.retryable);
+    assert!(denied.hint.contains("Do not retry"));
+}

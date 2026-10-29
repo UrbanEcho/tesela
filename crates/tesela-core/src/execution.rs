@@ -148,6 +148,19 @@ pub struct ExecutionBudget {
     pub wall_time: Option<Duration>,
 }
 
+/// Unspent budget for one execution; `None` means the resource is unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RemainingBudget {
+    /// Backend calls still allowed.
+    pub backend_calls: Option<u64>,
+    /// Rows still allowed.
+    pub rows: Option<u64>,
+    /// Bytes still allowed.
+    pub bytes: Option<u64>,
+    /// External cost units still allowed.
+    pub external_cost: Option<u64>,
+}
+
 #[derive(Debug, Default)]
 struct Usage {
     backend_calls: AtomicU64,
@@ -347,6 +360,19 @@ impl ExecutionContext {
             self.budget.external_cost,
             "external cost",
         )
+    }
+    /// Budget still available for each limited resource; `None` means unlimited.
+    #[must_use]
+    pub fn remaining_budget(&self) -> RemainingBudget {
+        let left = |used: &AtomicU64, limit: Option<u64>| {
+            limit.map(|limit| limit.saturating_sub(used.load(Ordering::Relaxed)))
+        };
+        RemainingBudget {
+            backend_calls: left(&self.usage.backend_calls, self.budget.backend_calls),
+            rows: left(&self.usage.rows, self.budget.rows),
+            bytes: left(&self.usage.bytes, self.budget.bytes),
+            external_cost: left(&self.usage.external_cost, self.budget.external_cost),
+        }
     }
     /// Remaining wall time, when a deadline exists.
     #[must_use]

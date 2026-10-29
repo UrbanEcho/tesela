@@ -354,6 +354,28 @@ impl BindingsBuilder {
 pub trait PolicyEngine: Send + Sync {
     /// Evaluate one borrowed request.
     fn evaluate(&self, request: &PolicyRequest<'_>) -> Result<PolicyDecision, Error>;
+
+    /// Whether reads of `object` need a per-record check beyond the row filter.
+    ///
+    /// Policies whose row access depends on data a filter cannot express (for
+    /// example membership in another table) return `true`; the runtime then
+    /// calls [`PolicyEngine::admit_record`] for every record it would return
+    /// and refuses backend-side aggregation for that object.
+    fn guards_records(&self, _context: &ExecutionContext, _object: &ApiName) -> bool {
+        false
+    }
+
+    /// Decide whether the principal may see one record of a guarded object.
+    ///
+    /// Only consulted when [`PolicyEngine::guards_records`] returned `true`.
+    fn admit_record(
+        &self,
+        _context: &ExecutionContext,
+        _object: &ApiName,
+        _record: &Record,
+    ) -> Result<bool, Error> {
+        Ok(true)
+    }
 }
 
 /// Denies every request.

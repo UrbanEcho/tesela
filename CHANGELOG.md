@@ -11,6 +11,12 @@
 - Added `Runtime::invoke` and `Runtime.invoke`, which route a `CapabilityInvocation` through the existing checked paths and return `InvocationOutput`. Retained results are returned as a bounded handle summary; the Python facade rejects `retain_results`.
 - Stale-generation invocations now name both generations and tell the caller to fetch the catalog again.
 - Breaking: removed `Capability.idempotent`; read idempotency from `Capability.annotations.idempotent`.
+- Added a record-level policy hook: `PolicyEngine::guards_records` and `admit_record` let a host admit rows no `Filter` can express. Search refills pages the guard thins out, lookups and traversals refuse rejected records, and aggregation falls back to the residual engine so it only counts admitted rows.
+- Added `fields` to `Query` and `TraversalQuery`: results keep only the listed properties (and the primary key). Unknown properties are rejected up front.
+- Added a `{object}.aggregate` capability and `InvocationOutput::Aggregate`, and `ExecutionContext::remaining_budget`.
+- Retained results now live in a bounded per-request store under stable ids (`h1`, `h2`, ...). Added `results.read` and `results.count_by` capabilities, `{"$handle": id, "field": name}` references in invocation input, `Runtime::handle` and `Runtime::release_handles`.
+- Added `Runtime::run_program` with `Program` and `ProgramStep`: a straight-line program of capability calls with `{"$ref": step, "field": name}` references, validated whole (catalog identity, visible capabilities, references, revisions, approvals, backend-call budget) before its first step runs.
+- Added `ModelReport`, a model-facing view of an error with its retryability and a recovery hint.
 - Reworked engine internals for data-oriented execution with no public API change: allocation-free filters and grouping, one residual engine shared by every row layout, a per-type locked in-memory table with an undo-log batch and link index, lazy repository search encoding, and paginated native aggregation fallback. Fixed the native-search cursor so it reports a next page only while rows remain.
 
 All package versions remain `0.2.0`.

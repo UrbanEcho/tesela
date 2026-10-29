@@ -1,16 +1,14 @@
 //! Invocation of catalog capabilities through the same checked paths as direct calls.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use serde::de::DeserializeOwned;
 use serde_json::{Map, json};
 use tesela_backend::{ActionRequest, Mutation, Query, TraversalQuery};
 
 use crate::capability::{Capability, CapabilityInvocation, ResultHandle, ToolExposure};
 
-use super::*;
+use super::results::{COUNT_BY_CAPABILITY, READ_CAPABILITY};
 
-static HANDLE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+use super::*;
 
 /// The outcome of a capability invocation, shaped for a model to read.
 #[derive(Debug, Clone, Serialize)]
@@ -20,6 +18,8 @@ pub enum InvocationOutput {
     Page(Page),
     /// One record returned inline.
     Record(Record),
+    /// The groups of an aggregation.
+    Aggregate(AggregateResult),
     /// The outcome of a mutation.
     Mutation(MutationResult),
     /// The outcome of a semantic action.
@@ -46,12 +46,17 @@ impl Runtime {
     /// Hidden and unknown capabilities report as not found. Each route calls the
     /// checked runtime method for its operation, so policy, approval and
     /// revision checks apply exactly as they do to direct calls.
+    ///
+    /// Input may reference handles retained earlier in the same request with
+    /// `{"$handle": id, "field": name}`; the reference expands to that field's
+    /// values without the rows passing through model context.
     pub fn invoke(
         &self,
         context: &ExecutionContext,
-        invocation: CapabilityInvocation,
+        mut invocation: CapabilityInvocation,
     ) -> Result<Execution<InvocationOutput>, Error> {
         self.validate_invocation(&invocation)?;
+        self.resolve_handle_refs(context, &mut invocation.input.0)?;
         let catalog = self.capabilities(context, "")?;
         let capability = catalog
             .capabilities
@@ -78,6 +83,12 @@ impl Runtime {
             )));
         }
         let retain = invocation.retain_results;
+        if matches!(
+            capability.name.as_str(),
+            READ_CAPABILITY | COUNT_BY_CAPABILITY
+        ) {
+            return self.invoke_results(context, &capability.name, invocation.input.0);
+        }
         match capability.operation {
             Operation::Search => {
                 let (object, _) = split_name(capability)?;
@@ -90,6 +101,12 @@ impl Runtime {
                 let input: GetInput = decode(invocation.input.0)?;
                 let execution = self.get(context, &object, &input.key)?;
                 Ok(wrap(execution, InvocationOutput::Record))
+            }
+            Operation::Aggregate => {
+                let (object, _) = split_name(capability)?;
+                let query: AggregateQuery = decode(invocation.input.0)?;
+                let execution = self.aggregate(context, &object, query)?;
+                Ok(wrap(execution, InvocationOutput::Aggregate))
             }
             Operation::Mutate => {
                 let (object, suffix) = split_name(capability)?;
@@ -133,10 +150,7 @@ impl Runtime {
             records,
             next_cursor,
         } = execution.output;
-        // The handle is bounded by the rows this page already materialized.
-        let max_rows = records.len();
-        let id = format!("result-{}", HANDLE_SEQUENCE.fetch_add(1, Ordering::Relaxed));
-        let handle = ResultHandle::new(context, id, records, max_rows)?;
+        let handle = self.retain_records(context, records)?;
         Ok(Execution {
             output: InvocationOutput::Handle {
                 handle,

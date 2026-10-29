@@ -84,8 +84,21 @@ fn key_schema(object: &CompiledObjectType) -> serde_json::Value {
     data_type_schema(object.primary_key().data_type())
 }
 
+/// Schema for the property names of an object, used by projections and grouping.
+fn property_names_schema(object: &CompiledObjectType) -> serde_json::Value {
+    let names: Vec<&str> = object
+        .properties()
+        .iter()
+        .map(|property| property.api_name().as_str())
+        .collect();
+    json!({"type": "array", "items": {"type": "string", "enum": names}})
+}
+
 /// Schema for an object search: the serialized query fields.
-pub(super) fn search_schema() -> serde_json::Value {
+pub(super) fn search_schema(object: &CompiledObjectType) -> serde_json::Value {
+    let mut fields = property_names_schema(object);
+    fields["description"] =
+        json!("Properties to return; the primary key is always included. Omit for all.");
     json!({
         "type": "object",
         "properties": {
@@ -94,7 +107,35 @@ pub(super) fn search_schema() -> serde_json::Value {
             "limit": {"type": "integer", "minimum": 1},
             "offset": {"type": "integer", "minimum": 0},
             "cursor": {"type": "string"},
+            "fields": fields,
         },
+        "additionalProperties": false,
+    })
+}
+
+/// Schema for a grouped aggregation over one object type.
+pub(super) fn aggregate_schema(object: &CompiledObjectType) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "filter": {"type": "object", "description": "Filter applied before aggregating."},
+            "group_by": property_names_schema(object),
+            "aggregations": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "function": {"enum": ["count", "sum", "avg", "min", "max"]},
+                        "property": {"type": "string"},
+                        "alias": {"type": "string"},
+                    },
+                    "required": ["function", "alias"],
+                    "additionalProperties": false,
+                },
+            },
+        },
+        "required": ["aggregations"],
         "additionalProperties": false,
     })
 }
@@ -156,6 +197,11 @@ pub(super) fn traverse_schema(source: Option<&CompiledObjectType>) -> serde_json
             "sort": {"type": "array", "items": {"type": "object"}},
             "limit": {"type": "integer", "minimum": 1},
             "offset": {"type": "integer", "minimum": 0},
+            "fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Target properties to return; the primary key is always included.",
+            },
         },
         "required": ["source_pk"],
         "additionalProperties": false,

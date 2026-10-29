@@ -389,6 +389,7 @@ impl<T: Object, B: Native<T>> RawBackend for NativeAdapter<T, B> {
             limit: Some(i32::try_from(limit.saturating_add(1)).unwrap_or(i32::MAX)),
             offset: Some(i32::try_from(offset).unwrap_or(i32::MAX)),
             cursor: None,
+            fields: None,
         };
         let mut records = self
             .backend

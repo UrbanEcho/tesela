@@ -24,6 +24,10 @@ pub struct Query {
     /// Cursor pagination token.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cursor: Option<String>,
+    /// Properties to return. The primary key is always kept; `None` returns
+    /// every property the caller may read.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fields: Option<Vec<tesela_core::ApiName>>,
 }
 
 impl Query {
@@ -215,6 +219,9 @@ pub struct TraversalQuery {
     /// Offset.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub offset: Option<i32>,
+    /// Target properties to return; the primary key is always kept.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fields: Option<Vec<tesela_core::ApiName>>,
 }
 
 /// Request to execute an action.

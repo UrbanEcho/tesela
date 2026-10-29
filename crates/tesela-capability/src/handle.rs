@@ -49,6 +49,16 @@ impl ResultHandle {
     pub fn id(&self) -> &str {
         &self.id
     }
+    /// Number of retained records.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+    /// Whether the handle retains no records.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
     /// Page retained records.
     pub fn page(
         &self,

@@ -49,7 +49,34 @@ pub(super) fn check_query(object: &CompiledObjectType, query: &Query) -> Result<
             return Err(Error::unknown_property(object, &sort.property));
         }
     }
+    check_fields(object, query.fields.as_deref())
+}
+
+/// Reject a field projection that names an undeclared property.
+pub(super) fn check_fields(
+    object: &CompiledObjectType,
+    fields: Option<&[ApiName]>,
+) -> Result<(), Error> {
+    for field in fields.unwrap_or_default() {
+        if object.property(field).is_none() {
+            return Err(Error::unknown_property(object, field));
+        }
+    }
     Ok(())
+}
+
+/// Keep only the requested properties, always preserving the primary key.
+pub(super) fn project_fields(
+    records: &mut [Record],
+    fields: Option<&[ApiName]>,
+    primary_key: &ApiName,
+) {
+    let Some(fields) = fields else { return };
+    for record in records {
+        record
+            .values
+            .retain(|name, _| name == primary_key || fields.contains(name));
+    }
 }
 
 /// Apply defaults and validate a mutation in place, once, before it runs.

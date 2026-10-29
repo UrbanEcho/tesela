@@ -426,6 +426,7 @@ impl<L: Link> Plan for Traverse<L> {
             sort: self.sort,
             limit: self.limit,
             offset: self.offset,
+            fields: None,
         };
         let execution = runtime.traverse(context, &L::definition().api_name, raw)?;
         let items = execution

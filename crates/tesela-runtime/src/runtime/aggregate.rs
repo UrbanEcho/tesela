@@ -39,7 +39,8 @@ impl Runtime {
         effective
             .group_by
             .retain(|field| !decision.redactions.contains(field));
-        let result = if backend.capabilities().aggregate {
+        let guarded = self.guards(context, object);
+        let result = if backend.capabilities().aggregate && !guarded {
             backend.aggregate(context, object, &effective)?
         } else {
             let mut accumulator =
@@ -56,9 +57,14 @@ impl Runtime {
                         ..Query::default()
                     },
                 )?;
-                context.charge_rows(page.records.len() as u64)?;
-                charge_bytes_with(context, || records_bytes(&page.records))?;
-                accumulator.extend(&page.records);
+                let records = if guarded {
+                    self.admit(context, object, page.records)?
+                } else {
+                    page.records
+                };
+                context.charge_rows(records.len() as u64)?;
+                charge_bytes_with(context, || records_bytes(&records))?;
+                accumulator.extend(&records);
                 cursor = page.next_cursor;
                 if cursor.is_none() {
                     break;
@@ -124,20 +130,26 @@ impl Runtime {
             .map_or(source_filter.clone(), |policy| {
                 Filter::and(vec![source_filter, policy])
             });
-        if source_backend
-            .search(
-                context,
-                source.api_name(),
-                &Query {
-                    filter: Some(source_filter),
-                    limit: Some(1),
-                    ..Query::default()
-                },
-            )?
-            .records
-            .is_empty()
-        {
+        let source_page = source_backend.search(
+            context,
+            source.api_name(),
+            &Query {
+                filter: Some(source_filter),
+                limit: Some(1),
+                ..Query::default()
+            },
+        )?;
+        let Some(source_record) = source_page.records.into_iter().next() else {
             return Err(Error::not_found("record", &query.source_pk));
+        };
+        if self.guards(context, source.api_name())
+            && !self
+                .policy
+                .admit_record(context, source.api_name(), &source_record)?
+        {
+            return Err(Error::policy_denied(
+                "source record is outside the permitted access scope",
+            ));
         }
         let mut decision = self.authorize(
             context,
@@ -178,6 +190,7 @@ impl Runtime {
                 Filter::and(vec![existing, policy])
             }));
         }
+        check_fields(target, query.fields.as_deref())?;
         let limit = effective_limit(query.limit, self.max_query_limit);
         let offset = query.offset.unwrap_or_default().max(0) as usize;
         let keep = offset.saturating_add(limit).saturating_add(1);
@@ -201,9 +214,10 @@ impl Runtime {
                     limit: Some(keep as i32),
                     offset: None,
                     cursor: None,
+                    fields: None,
                 },
             )?;
-            records.extend(page.records);
+            records.extend(self.admit(context, target.api_name(), page.records)?);
             records.sort_unstable_by(|left, right| compare_records(left, right, &query.sort));
             records.truncate(keep);
         }
@@ -220,6 +234,11 @@ impl Runtime {
         redact(&mut page.records, &decision.redactions);
         context.charge_rows(page.records.len() as u64)?;
         charge_bytes_with(context, || records_bytes(&page.records))?;
+        project_fields(
+            &mut page.records,
+            query.fields.as_deref(),
+            target.primary_key().api_name(),
+        );
         Ok(self.finish(
             context,
             &snapshot,

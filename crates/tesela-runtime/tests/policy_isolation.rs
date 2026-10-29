@@ -256,6 +256,7 @@ fn traversal_enforces_source_and_target_row_scopes() -> Result<(), Error> {
                 sort: Vec::new(),
                 limit: None,
                 offset: None,
+                fields: None,
             },
         )?
         .output;
@@ -270,6 +271,7 @@ fn traversal_enforces_source_and_target_row_scopes() -> Result<(), Error> {
             sort: Vec::new(),
             limit: None,
             offset: None,
+            fields: None,
         },
     );
     assert!(hidden_source.is_err_and(|error| error.is(ErrorCode::NotFound)));

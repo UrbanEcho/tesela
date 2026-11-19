@@ -143,7 +143,7 @@ pub struct Page {
     pub records: Vec<Record>,
     /// Opaque cursor for the next page, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<crate::Cursor>,
 }
 
 /// Result of a mutation.

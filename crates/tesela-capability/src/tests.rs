@@ -96,11 +96,15 @@ fn result_handles_are_bounded_and_execution_scoped() {
         Key::string("one"),
         BTreeMap::from([(ApiName::from("id"), Value::string("one"))]),
     );
-    let handle = ResultHandle::new(&context, "result-1", vec![record], 1).expect("bounded");
-    assert_eq!(handle.page(&context, 0, 1).expect("same context").len(), 1);
+    let handle =
+        ResultHandle::new(&context, "result-1", vec![record], Vec::new()).expect("bounded");
+    let one = std::num::NonZeroUsize::MIN;
+    let (page, next) = handle.page(&context, None, one).expect("same context");
+    assert_eq!(page.len(), 1);
+    assert!(next.is_none());
     let other =
         ExecutionContext::trusted(Principal::new("agent"), "request-b").expect("other context");
-    assert!(handle.page(&other, 0, 1).is_err());
+    assert!(handle.page(&other, None, one).is_err());
 }
 
 #[test]

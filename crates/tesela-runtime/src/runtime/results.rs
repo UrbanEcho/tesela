@@ -1,5 +1,7 @@
 //! Execution-scoped result handles: retention, paging, counting and reference resolution.
 
+use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -11,14 +13,11 @@ use crate::capability::{Capability, CapabilityAnnotations, ResultHandle, ToolExp
 
 use super::*;
 
-/// Requests whose handles are kept before the oldest are evicted.
-const MAX_REQUESTS: usize = 256;
-/// Handles one request may retain.
+/// Handles one request may retain. This is an explicit resource error, not a
+/// data cap: a request that needs more results reads them page by page.
 const MAX_HANDLES_PER_REQUEST: usize = 32;
-/// Rows a single read of a handle returns when the caller gives no limit.
+/// Default page size of a handle read that gives no limit.
 const DEFAULT_READ_LIMIT: usize = 50;
-/// Values a `$handle` reference may expand to.
-const MAX_REFERENCE_VALUES: usize = 1_000;
 
 /// Capability name that pages the records of a retained handle.
 pub(super) const READ_CAPABILITY: &str = "results.read";
@@ -26,25 +25,47 @@ pub(super) const READ_CAPABILITY: &str = "results.read";
 pub(super) const COUNT_BY_CAPABILITY: &str = "results.count_by";
 
 /// Bounded store of retained handles, grouped by request.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct HandleStore {
-    requests: Mutex<Vec<(String, Vec<ResultHandle>)>>,
+    capacity: usize,
+    state: Mutex<StoreState>,
+}
+
+/// Live requests, oldest first, and the ids of the most recently evicted ones.
+#[derive(Debug, Default)]
+struct StoreState {
+    requests: Vec<(String, Vec<ResultHandle>)>,
+    /// Bounded to the store capacity so an evicted handle reports expiry.
+    evicted: VecDeque<String>,
 }
 
 impl HandleStore {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            state: Mutex::default(),
+        }
+    }
+
     fn insert(
         &self,
         context: &ExecutionContext,
         build: impl FnOnce(String) -> Result<ResultHandle, Error>,
     ) -> Result<ResultHandle, Error> {
-        let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let StoreState { requests, evicted } = &mut *state;
         let request = context.request_id();
         let index = match requests.iter().position(|(id, _)| id == request) {
             Some(index) => index,
             None => {
-                if requests.len() >= MAX_REQUESTS {
-                    requests.remove(0);
+                if requests.len() >= self.capacity {
+                    let (oldest, _) = requests.remove(0);
+                    if evicted.len() >= self.capacity {
+                        evicted.pop_front();
+                    }
+                    evicted.push_back(oldest);
                 }
+                evicted.retain(|id| id != request);
                 requests.push((request.to_string(), Vec::new()));
                 requests.len() - 1
             }
@@ -61,18 +82,37 @@ impl HandleStore {
     }
 
     fn get(&self, context: &ExecutionContext, id: &str) -> Result<ResultHandle, Error> {
-        let requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
-        requests
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .requests
             .iter()
             .find(|(request, _)| request == context.request_id())
             .and_then(|(_, handles)| handles.iter().find(|handle| handle.id() == id))
             .cloned()
-            .ok_or_else(|| Error::not_found("result handle", id))
+            .ok_or_else(|| {
+                if state
+                    .evicted
+                    .iter()
+                    .any(|request| request == context.request_id())
+                {
+                    Error::new(
+                        ErrorCode::NotFound,
+                        format!(
+                            "result handle {id} expired: its request was evicted; \
+                             re-run the search and follow next_cursor"
+                        ),
+                    )
+                } else {
+                    Error::not_found("result handle", id)
+                }
+            })
     }
 
     fn release(&self, context: &ExecutionContext) {
-        let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
-        requests.retain(|(request, _)| request != context.request_id());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .requests
+            .retain(|(request, _)| request != context.request_id());
     }
 }
 
@@ -81,9 +121,9 @@ impl HandleStore {
 struct ReadInput {
     handle: String,
     #[serde(default)]
-    offset: usize,
+    cursor: Option<Cursor>,
     #[serde(default)]
-    limit: Option<usize>,
+    limit: Option<i64>,
     #[serde(default)]
     fields: Option<Vec<ApiName>>,
 }
@@ -104,10 +144,11 @@ impl Runtime {
         &self,
         context: &ExecutionContext,
         records: Vec<Record>,
+        sort: &[Sort],
+        partial: bool,
     ) -> Result<ResultHandle, Error> {
-        let max_rows = records.len();
         self.handles.insert(context, |id| {
-            ResultHandle::new(context, id, records, max_rows)
+            ResultHandle::new(context, id, records, sort).map(|handle| handle.with_partial(partial))
         })
     }
 
@@ -137,15 +178,25 @@ impl Runtime {
             let input: ReadInput = serde_json::from_value(input)
                 .map_err(|error| Error::validation(error.to_string()))?;
             let handle = self.handles.get(context, &input.handle)?;
-            let limit = input.limit.unwrap_or(DEFAULT_READ_LIMIT).clamp(1, 1_000);
-            let mut records = handle.page(context, input.offset, limit)?;
-            let next = input.offset + records.len();
+            if let Some(cursor) = &input.cursor {
+                cursor.check_token()?;
+            }
+            let limit = effective_limit(
+                Some(
+                    input
+                        .limit
+                        .unwrap_or_else(|| DEFAULT_READ_LIMIT.min(self.max_query_limit) as i64),
+                ),
+                self.max_query_limit,
+            )?;
+            let limit = NonZeroUsize::new(limit)
+                .ok_or_else(|| Error::internal("a validated limit is at least 1"))?;
+            let (mut records, next_cursor) = handle.page(context, input.cursor.as_ref(), limit)?;
             if let Some(fields) = &input.fields {
                 for record in &mut records {
                     record.values.retain(|name, _| fields.contains(name));
                 }
             }
-            let next_cursor = (next < handle.len()).then(|| next.to_string());
             InvocationOutput::Page(Page {
                 records,
                 next_cursor,
@@ -208,14 +259,19 @@ impl Runtime {
                     })
                     .transpose()?;
                 let handle = self.handles.get(context, &id)?;
-                let records = handle.page(context, 0, MAX_REFERENCE_VALUES + 1)?;
-                if records.len() > MAX_REFERENCE_VALUES {
-                    return Err(Error::bad_request(format!(
-                        "handle {id} has more than {MAX_REFERENCE_VALUES} records and cannot be expanded"
+                // Every record is expanded, never truncated. A handle that is
+                // only one page of a larger query cannot honor that, so it is
+                // refused rather than expanded into a partial key list.
+                if handle.is_partial() {
+                    return Err(Error::validation(format!(
+                        "handle '{id}' holds one page of a larger result and `$handle` \
+                         cannot follow cursors; reference the query with a program \
+                         `$ref`, which follows every cursor, or read the handle with \
+                         `results.read` and follow its next_cursor"
                     )));
                 }
-                let values = records
-                    .into_iter()
+                let values = handle
+                    .iter(context)?
                     .filter_map(|record| match &field {
                         Some(field) => record.values.get(field).map(|value| json!(value)),
                         None => Some(json!(record.primary_key)),
@@ -241,7 +297,7 @@ impl Runtime {
 
 /// The catalog entries that read retained handles. They are request-scoped, so
 /// they are listed for every principal and never touch a backend.
-pub(super) fn handle_capabilities() -> Vec<Capability> {
+pub(super) fn handle_capabilities(max_limit: usize) -> Vec<Capability> {
     let effects = tesela_ir::ActionEffects::read_only();
     let entry = |name: &str, description: &str, schema: serde_json::Value| Capability {
         name: name.to_string(),
@@ -271,8 +327,11 @@ pub(super) fn handle_capabilities() -> Vec<Capability> {
                 "required": ["handle"],
                 "properties": {
                     "handle": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 0},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": max_limit},
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque token: the `next_cursor` of a previous read of this handle. Omit for the first page.",
+                    },
                     "fields": {"type": "array", "items": {"type": "string"}},
                 },
                 "additionalProperties": false,

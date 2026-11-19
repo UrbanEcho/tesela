@@ -202,3 +202,29 @@ fn rows_added_after_the_first_query_are_visible_to_it() {
         Value::string("b")
     );
 }
+
+#[test]
+fn the_memory_backend_passes_the_cursor_walk_conformance_suite() {
+    let backend = MemoryBackend::new();
+    let seed_context = context();
+    let seed = |object: &ApiName, rows: &[tesela_ir::Record]| {
+        for row in rows {
+            backend.create(
+                &seed_context,
+                object,
+                row.primary_key.clone(),
+                row.values.clone(),
+            )?;
+        }
+        Ok(())
+    };
+    crate::conformance::verify_cursors(
+        backend.as_ref(),
+        &crate::conformance::CursorFixture {
+            object: name("cursor_walk"),
+            primary_key: name("id"),
+            seed: &seed,
+        },
+    )
+    .expect("conformant cursor walks");
+}

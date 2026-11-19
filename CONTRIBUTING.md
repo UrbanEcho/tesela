@@ -17,4 +17,4 @@ python scripts/check_release.py
 
 Add behavior tests for public changes and focused lower-level tests for compiler, policy, concurrency, and bounded-execution invariants. Performance claims require same-host measurements with the command, profile, input size, and median of at least three runs recorded. Do not emulate atomic operations or weaken validation for a benchmark.
 
-New public APIs must preserve the laws in [DESIGN.md](DESIGN.md). Compatibility aliases and transitional dual APIs are not accepted in the 0.2 facade.
+New public APIs must preserve the laws in [DESIGN.md](DESIGN.md). Compatibility aliases and transitional dual APIs are not accepted in the 0.3 facade.

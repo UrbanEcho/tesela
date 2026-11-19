@@ -102,6 +102,12 @@ fn retained_results_are_queried_through_the_execution_scoped_handle() -> Result<
     let raw::InvocationOutput::Handle { handle, .. } = output else {
         panic!("retained search returns a handle");
     };
-    assert_eq!(handle.page(&context, 0, 10)?.len(), 2);
+    let (rows, next) = handle.page(
+        &context,
+        None,
+        std::num::NonZeroUsize::new(10).expect("nonzero"),
+    )?;
+    assert_eq!(rows.len(), 2);
+    assert!(next.is_none());
     Ok(())
 }

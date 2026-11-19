@@ -153,7 +153,7 @@ impl Runtime {
                     idempotent: true,
                 };
                 let input_schema = match suffix {
-                    "search" => search_schema(object),
+                    "search" => search_schema(object, self.max_query_limit),
                     "aggregate" => aggregate_schema(object),
                     _ => get_schema(object),
                 };
@@ -269,7 +269,7 @@ impl Runtime {
                 description: format!("traverse the {} relationship", link.api_name()),
                 operation: Operation::Traverse,
                 exposure,
-                input_schema: Value::new(traverse_schema(source)),
+                input_schema: Value::new(traverse_schema(source, self.max_query_limit)),
                 effects,
                 annotations: annotations(effects, RiskLevel::Low),
                 approval_required: decision
@@ -332,7 +332,7 @@ impl Runtime {
             .iter()
             .any(|capability| capability.exposure != ToolExposure::Hidden)
         {
-            capabilities.extend(super::results::handle_capabilities());
+            capabilities.extend(super::results::handle_capabilities(self.max_query_limit));
         }
         Ok(CapabilityCatalog {
             generation: snapshot.ontology.generation(),

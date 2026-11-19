@@ -25,7 +25,17 @@ class Repository(Generic[T]):
 
 
 class Native(Generic[T]):
-    """Base class for integrations that execute planned queries natively."""
+    """Base class for integrations that execute planned queries natively.
+
+    `search` must honour the query's filter, sort and limit and return the rows
+    ordered by the sort keys followed by the primary key ascending (an unsorted
+    query is ordered by primary key). Missing and null values form one class that
+    sorts before present values ascending and after them descending. Cursor
+    resumption arrives already folded into `query["filter"]`: return the first
+    `limit` matching rows in that order and nothing else. The runtime asks for one
+    extra row to detect the next page, verifies the ordering and derives the
+    opaque cursor itself, so `search` returns only records and never a cursor.
+    """
 
     def search(self, context: Context, query: Mapping[str, Any]) -> Iterable[T]:
         raise NotImplementedError

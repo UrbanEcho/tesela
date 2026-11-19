@@ -11,14 +11,16 @@ use crate::model::{
     encode_value,
 };
 use crate::query::{AggregateExpr, Expr, Order};
-use crate::raw::{self, ApiName, Filter, Mutation, Revision, Value};
+use crate::raw::{self, ApiName, Cursor, Filter, Mutation, Revision, Value};
 
 mod sealed {
     pub trait Sealed {}
 }
 mod action;
 mod batch;
+mod traverse;
 pub use batch::{Batch, BatchItem, batch};
+pub use traverse::{Traverse, traverse};
 
 /// A value that can be executed only by a [`Runtime`](crate::Runtime).
 pub trait Plan: sealed::Sealed + Sized {
@@ -72,10 +74,13 @@ impl<T: Object> Query<T> {
         self.raw.limit = Some(limit.min(i32::MAX as usize) as i32);
         self
     }
-    /// Apply an offset.
+    /// Resume strictly after the last row of a previous page.
+    ///
+    /// `cursor` is the `next_cursor` of a page of this same query; it is
+    /// rejected when the filter or ordering differ.
     #[must_use]
-    pub fn offset(mut self, offset: usize) -> Self {
-        self.raw.offset = Some(offset.min(i32::MAX as usize) as i32);
+    pub fn after(mut self, cursor: Cursor) -> Self {
+        self.raw.cursor = Some(cursor);
         self
     }
     /// Begin grouped aggregation.
@@ -362,84 +367,6 @@ impl<T: Object> Plan for Delete<T> {
         )?;
         Ok(Execution {
             value: (),
-            receipt: execution.receipt,
-            revision: None,
-        })
-    }
-}
-
-/// Link traversal plan.
-#[derive(Debug, Clone)]
-pub struct Traverse<L: Link> {
-    source_key: <L::Source as Object>::Key,
-    filter: Option<Filter>,
-    sort: Vec<raw::Sort>,
-    limit: Option<i32>,
-    offset: Option<i32>,
-    marker: PhantomData<fn() -> L>,
-}
-/// Build a typed traversal.
-pub fn traverse<L: Link>(key: <L::Source as Object>::Key) -> Traverse<L> {
-    Traverse {
-        source_key: key,
-        filter: None,
-        sort: Vec::new(),
-        limit: None,
-        offset: None,
-        marker: PhantomData,
-    }
-}
-impl<L: Link> Traverse<L> {
-    /// Add a target predicate.
-    #[must_use]
-    pub fn filter(mut self, predicate: Expr<L::Target>) -> Self {
-        self.filter = Some(match self.filter.take() {
-            Some(old) => Filter::and(vec![old, predicate.filter]),
-            None => predicate.filter,
-        });
-        self
-    }
-    /// Add target ordering.
-    #[must_use]
-    pub fn order_by(mut self, order: Order<L::Target>) -> Self {
-        self.sort.push(order.sort);
-        self
-    }
-    /// Bound results.
-    #[must_use]
-    pub fn limit(mut self, limit: usize) -> Self {
-        self.limit = Some(limit.min(i32::MAX as usize) as i32);
-        self
-    }
-}
-impl<L: Link> sealed::Sealed for Traverse<L> {}
-impl<L: Link> Plan for Traverse<L> {
-    type Output = Page<L::Target>;
-    fn execute(
-        self,
-        runtime: &raw::Runtime,
-        context: &crate::Context,
-    ) -> Result<Execution<Self::Output>, Error> {
-        let raw = raw::TraversalQuery {
-            source_pk: encode_key(&self.source_key)?,
-            filter: self.filter,
-            sort: self.sort,
-            limit: self.limit,
-            offset: self.offset,
-            fields: None,
-        };
-        let execution = runtime.traverse(context, &L::definition().api_name, raw)?;
-        let items = execution
-            .output
-            .records
-            .into_iter()
-            .map(L::Target::decode)
-            .collect::<Result<_, _>>()?;
-        Ok(Execution {
-            value: Page {
-                items,
-                next_cursor: execution.output.next_cursor,
-            },
             receipt: execution.receipt,
             revision: None,
         })

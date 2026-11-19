@@ -137,6 +137,14 @@ plan = (
     .limit(10)
 )
 customers = runtime.run(plan, context=context)
+
+# Pagination is keyset-only. `next_cursor` is opaque; it is None on the last page.
+page = runtime.run(plan, context=context)
+while True:
+    handle(page.items)
+    if page.next_cursor is None:
+        break
+    page = runtime.run(plan.after(page.next_cursor), context=context)
 ```
 
 Model attributes remain ordinary Python values; expressions begin explicitly with `ts.col(...)` or `ts.lit(...)`. `MemoryBackend` is only a development implementation; production applications bind the same definition to typed repository callbacks or native pushdown integrations.

@@ -1,7 +1,9 @@
-use tesela::backend::{Native, native};
+use std::sync::{Arc, Mutex};
+
+use tesela::backend::{Native, ObjectBinding, native};
 use tesela::prelude::*;
-use tesela::raw::Query as RawQuery;
-use tesela::{Page, count, create, query};
+use tesela::raw::{ApiName, Backend as RawBackend, Key, Query as RawQuery, Record, conformance};
+use tesela::{Page, Query, count, create, query};
 
 #[derive(Debug, Clone, PartialEq, Object)]
 #[tesela(key = id)]
@@ -58,54 +60,111 @@ fn a_repository_scan_matches_the_memory_backend_for_every_query_shape() -> Resul
                         .and(Customer::region().ends_with("th")),
                 )
                 .order_by(Customer::spend().desc())
-                .limit(5)
-                .offset(3),
+                .limit(5),
             query::<Customer>()
                 .order_by(Customer::spend().asc())
                 .order_by(Customer::id().desc())
-                .limit(9)
-                .offset(20),
+                .limit(9),
             query::<Customer>().filter(Customer::spend().gt(1000)),
         ]
     };
     for (left, right) in plans().into_iter().zip(plans()) {
-        let expected: Page<Customer> = memory.run(left, &context)?;
-        let actual: Page<Customer> = repository.run(right, &context)?;
+        let expected = walk(&memory, left, &context)?;
+        let actual = walk(&repository, right, &context)?;
         assert_eq!(actual, expected);
     }
     Ok(())
 }
 
-struct Slice(Vec<Customer>);
+/// Follow `next_cursor` to the end, returning every page.
+fn walk(
+    runtime: &Runtime,
+    plan: Query<Customer>,
+    context: &Context,
+) -> Result<Vec<Page<Customer>>, Error> {
+    let mut pages = Vec::new();
+    let mut next = plan.clone();
+    loop {
+        let page: Page<Customer> = runtime.run(next, context)?;
+        let cursor = page.next_cursor.clone();
+        pages.push(page);
+        match cursor {
+            Some(cursor) => next = plan.clone().after(cursor),
+            None => return Ok(pages),
+        }
+        assert!(pages.len() < 100, "a cursor walk must terminate");
+    }
+}
 
-impl Native<Customer> for Slice {
+/// A native backend that honours filter, sort and limit over fixed rows.
+struct Ordered(Vec<Customer>);
+
+impl Native<Customer> for Ordered {
     fn search(&self, _: &Context, query: &RawQuery) -> Result<Vec<Customer>, Error> {
-        let offset = usize::try_from(query.offset.unwrap_or(0)).unwrap_or(0);
+        let records = self
+            .0
+            .iter()
+            .map(|customer| {
+                Ok(Record::new(
+                    Key::Str(customer.id.as_str().into()),
+                    customer.encode()?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        tesela::raw::execute_residual(
+            &records,
+            query,
+            "ordered",
+            tesela::raw::ScanOrder::Arbitrary,
+        )?
+        .records
+        .into_iter()
+        .map(Customer::decode)
+        .collect()
+    }
+}
+
+/// A native backend that ignores the requested order.
+struct Unordered(Vec<Customer>);
+
+impl Native<Customer> for Unordered {
+    fn search(&self, _: &Context, query: &RawQuery) -> Result<Vec<Customer>, Error> {
         let limit = usize::try_from(query.limit.unwrap_or(i32::MAX)).unwrap_or(0);
-        Ok(self.0.iter().skip(offset).take(limit).cloned().collect())
+        Ok(self.0.iter().rev().take(limit).cloned().collect())
     }
 }
 
 #[test]
-fn a_native_backend_reports_a_cursor_only_while_rows_remain() -> Result<(), Error> {
+fn a_native_backend_pages_by_cursor_and_reports_the_end() -> Result<(), Error> {
     let context = context()?;
-    for (count, expected) in [
-        (10, [Some("4"), Some("8"), None]),
-        (8, [Some("4"), None, None]),
-    ] {
+    for (count, pages) in [(10, 3), (8, 2)] {
         let runtime = Runtime::builder()
-            .object::<Customer>(native(Slice(customers(count))))
+            .object::<Customer>(native(Ordered(customers(count))))
             .policy(tesela::policy::allow_all)
             .build()?;
-        let mut cursors = Vec::new();
-        for page in 0..3 {
-            let result = runtime.run(query::<Customer>().limit(4).offset(page * 4), &context)?;
-            cursors.push(result.next_cursor);
-            assert!(result.items.len() <= 4);
-        }
-        let cursors: Vec<_> = cursors.iter().map(Option::as_deref).collect();
-        assert_eq!(cursors, expected);
+        let walked = walk(&runtime, query::<Customer>().limit(4), &context)?;
+        assert_eq!(walked.len(), pages);
+        assert!(walked.last().is_some_and(|page| page.next_cursor.is_none()));
+        let ids: Vec<_> = walked
+            .iter()
+            .flat_map(|page| page.items.iter().map(|item| item.id.clone()))
+            .collect();
+        let expected: Vec<_> = customers(count).into_iter().map(|item| item.id).collect();
+        assert_eq!(ids, expected);
     }
+    Ok(())
+}
+
+#[test]
+fn a_native_backend_out_of_keyset_order_is_a_contract_error() -> Result<(), Error> {
+    let runtime = Runtime::builder()
+        .object::<Customer>(native(Unordered(customers(10))))
+        .policy(tesela::policy::allow_all)
+        .build()?;
+    let error = runtime
+        .run(query::<Customer>().limit(4), &context()?)
+        .expect_err("rows out of order are rejected");
+    assert!(error.to_string().contains("keyset order"), "{error}");
     Ok(())
 }
 
@@ -170,4 +229,90 @@ fn the_byte_budget_still_applies_when_it_is_set() -> Result<(), Error> {
         40
     );
     Ok(())
+}
+
+/// Rows of the backend conformance kit: optional integer sort properties.
+#[derive(Debug, Clone, PartialEq, Object)]
+#[tesela(key = id)]
+struct Probe {
+    id: String,
+    a: Option<i64>,
+    b: Option<i64>,
+}
+
+type Shared = Arc<Mutex<Vec<Probe>>>;
+
+fn probe_rows(records: &[Record]) -> Result<Vec<Probe>, Error> {
+    records.iter().cloned().map(Probe::decode).collect()
+}
+
+fn probe_record(probe: &Probe) -> Result<Record, Error> {
+    Ok(Record::new(
+        Key::Str(probe.id.as_str().into()),
+        probe.encode()?,
+    ))
+}
+
+fn run_cursor_suite(backend: &dyn RawBackend, shared: &Shared) -> Result<(), Error> {
+    let seed = |_: &ApiName, records: &[Record]| {
+        *shared.lock().expect("probe rows") = probe_rows(records)?;
+        Ok(())
+    };
+    conformance::verify_cursors(
+        backend,
+        &conformance::CursorFixture {
+            object: ApiName::new_unchecked("probe"),
+            primary_key: ApiName::new_unchecked("id"),
+            seed: &seed,
+        },
+    )
+}
+
+/// A native backend over shared rows that honours filter, sort and limit.
+struct SharedNative(Shared);
+
+impl Native<Probe> for SharedNative {
+    fn search(&self, _: &Context, query: &RawQuery) -> Result<Vec<Probe>, Error> {
+        let records = self
+            .0
+            .lock()
+            .expect("probe rows")
+            .iter()
+            .map(probe_record)
+            .collect::<Result<Vec<_>, Error>>()?;
+        tesela::raw::execute_residual(&records, query, "shared", tesela::raw::ScanOrder::Arbitrary)?
+            .records
+            .into_iter()
+            .map(Probe::decode)
+            .collect()
+    }
+}
+
+#[test]
+fn the_native_adapter_passes_the_cursor_walk_conformance_suite() -> Result<(), Error> {
+    let shared = Shared::default();
+    let adapter = ObjectBinding::<Probe>::into_raw(native(SharedNative(shared.clone())));
+    run_cursor_suite(adapter.as_ref(), &shared)
+}
+
+#[test]
+fn the_repository_scan_adapter_passes_the_cursor_walk_conformance_suite() -> Result<(), Error> {
+    let shared = Shared::default();
+    let (scan, create, delete) = (shared.clone(), shared.clone(), shared.clone());
+    let repository = backend::<Probe>()
+        .scan(move |_| Ok(scan.lock().expect("probe rows").clone()))
+        .create(move |_, probe| {
+            create.lock().expect("probe rows").push(probe.clone());
+            Ok(probe)
+        })
+        .delete(move |_, id| {
+            delete
+                .lock()
+                .expect("probe rows")
+                .retain(|probe| &probe.id != id);
+            Ok(())
+        })
+        .build();
+    let adapter = ObjectBinding::<Probe>::into_raw(repository);
+    run_cursor_suite(adapter.as_ref(), &shared)
 }

@@ -120,7 +120,7 @@ impl Filter {
         }
     }
 
-    fn scalar(op: FilterOp, field: ApiName, value: Value) -> Self {
+    pub(crate) fn scalar(op: FilterOp, field: ApiName, value: Value) -> Self {
         Self {
             op,
             field: Some(field),

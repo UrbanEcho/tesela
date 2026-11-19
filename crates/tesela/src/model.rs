@@ -74,7 +74,7 @@ pub struct Page<T> {
     /// Materialized values.
     pub items: Vec<T>,
     /// Opaque cursor for the next page.
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<crate::raw::Cursor>,
 }
 
 impl<T> IntoIterator for Page<T> {

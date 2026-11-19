@@ -23,8 +23,9 @@ impl Runtime {
         if let Some(filter) = decision.row_filter.clone() {
             query = query.and_filter(filter);
         }
-        query.limit = Some(effective_limit(query.limit, self.max_query_limit) as i32);
+        query.limit = Some(page_limit(query.limit, self.max_query_limit)?);
         check_query(object_type, &query)?;
+        check_sort_readable(&query.sort, &decision.redactions)?;
         let backend = object_backend(&snapshot, object_type)?;
         context.charge_backend_call()?;
         let mut page = self.search_guarded(context, backend.as_ref(), object, &query)?;

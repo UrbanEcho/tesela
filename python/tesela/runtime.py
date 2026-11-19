@@ -71,7 +71,7 @@ class _BackendAdapter:
     def search(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         callback = cast(Native[Any], self.implementation).search
         items = callback(_context(payload["context"]), cast(Mapping[str, Any], payload["query"]))
-        return {"records": [_record(self.model, item) for item in items], "next_cursor": None}
+        return {"records": [_record(self.model, item) for item in items]}
 
     def aggregate(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         callback = cast(Native[Any], self.implementation).aggregate
@@ -246,15 +246,15 @@ class Runtime:
 
     def _execute(self, plan: Any, context: Context) -> Mapping[str, Any]:
         wire = context._wire()
-        if isinstance(plan, Query): return self._native.search(wire, _name(plan.model), plan._wire())
+        if isinstance(plan, Query): return self._native.search(wire, _name(plan.model), cast("_native.QueryPayload", plan._wire()))
         if isinstance(plan, Get): return self._native.lookup(wire, _name(plan.model), plan.key)
         if isinstance(plan, (Create, Update, Delete, Upsert, Batch)):
             model, mutation = self._mutation(plan)
             return self._native.mutate(wire, _name(model), dict(mutation))
         if isinstance(plan, Traverse):
-            query = Query(plan.link.target, plan.predicates, plan.orders, plan.page_limit)._wire()
+            query = Query(plan.link.target, plan.predicates, plan.orders, plan.page_limit, plan.page_cursor)._wire()
             query["source_pk"] = plan.source_key
-            return self._native.traverse(wire, plan.link.name, query)
+            return self._native.traverse(wire, plan.link.name, cast("_native.TraversalPayload", query))
         if isinstance(plan, Aggregate): return self._native.aggregate(wire, _name(plan.model), plan._wire())
         definition = getattr(type(plan), "__tesela_action__", None)
         if definition is not None:
@@ -281,7 +281,7 @@ class Runtime:
 
     def explain(self, plan: Query[Any], context: Context) -> Mapping[str, Any]:
         if not isinstance(plan, Query): raise TypeError("explain currently accepts query plans")
-        return cast(Mapping[str, Any], self._native.explain(context._wire(), _name(plan.model), plan._wire()))
+        return cast(Mapping[str, Any], self._native.explain(context._wire(), _name(plan.model), cast("_native.QueryPayload", plan._wire())))
 
     def capabilities(self, context: Context, task: str = "") -> Mapping[str, Any]:
         return cast(Mapping[str, Any], self._native.capabilities(context._wire(), task))

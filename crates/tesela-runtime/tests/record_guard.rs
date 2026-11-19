@@ -149,3 +149,35 @@ fn aggregate_counts_only_admitted_records() -> Result<(), Error> {
     assert_eq!(result.groups[0].get("total"), Some(&Value::integer(3)));
     Ok(())
 }
+
+#[test]
+fn a_cursor_walk_reaches_every_admitted_record_and_no_other() -> Result<(), Error> {
+    let (runtime, context) = fixture()?;
+    let mut cursor = None;
+    let mut seen = Vec::new();
+    loop {
+        let page = runtime
+            .search(
+                &context,
+                &name("member"),
+                Query {
+                    limit: Some(1),
+                    cursor: cursor.take(),
+                    ..Query::default()
+                },
+            )?
+            .output;
+        assert!(page.records.len() <= 1);
+        seen.extend(
+            page.records
+                .iter()
+                .map(|record| record.primary_key.to_string()),
+        );
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, ["b1", "b2", "b3"]);
+    Ok(())
+}

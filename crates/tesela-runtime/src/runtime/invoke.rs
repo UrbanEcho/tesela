@@ -29,7 +29,7 @@ pub enum InvocationOutput {
         /// Handle over the retained records.
         handle: ResultHandle,
         /// Continuation cursor for the next page, when one exists.
-        next_cursor: Option<String>,
+        next_cursor: Option<Cursor>,
     },
 }
 
@@ -93,8 +93,9 @@ impl Runtime {
             Operation::Search => {
                 let (object, _) = split_name(capability)?;
                 let query: Query = decode(invocation.input.0)?;
+                let sort = query.sort.clone();
                 let execution = self.search(context, &object, query)?;
-                self.retain_page(context, execution, retain)
+                self.retain_page(context, execution, retain, &sort)
             }
             Operation::Read => {
                 let (object, _) = split_name(capability)?;
@@ -118,8 +119,9 @@ impl Runtime {
             Operation::Traverse => {
                 let (link, _) = split_name(capability)?;
                 let query: TraversalQuery = decode(invocation.input.0)?;
+                let sort = query.sort.clone();
                 let execution = self.traverse(context, &link, query)?;
-                self.retain_page(context, execution, retain)
+                self.retain_page(context, execution, retain, &sort)
             }
             Operation::Execute => {
                 let request = ActionRequest {
@@ -136,12 +138,15 @@ impl Runtime {
         }
     }
 
-    /// Return a page inline, or keep its records in a handle and return the summary.
+    /// Return a page inline, or keep its records in a handle and return the
+    /// summary. The handle orders its records by the query's `sort`; the
+    /// returned `next_cursor` continues the original query, not the handle.
     fn retain_page(
         &self,
         context: &ExecutionContext,
         execution: Execution<Page>,
         retain: bool,
+        sort: &[Sort],
     ) -> Result<Execution<InvocationOutput>, Error> {
         if !retain {
             return Ok(wrap(execution, InvocationOutput::Page));
@@ -150,7 +155,7 @@ impl Runtime {
             records,
             next_cursor,
         } = execution.output;
-        let handle = self.retain_records(context, records)?;
+        let handle = self.retain_records(context, records, sort, next_cursor.is_some())?;
         Ok(Execution {
             output: InvocationOutput::Handle {
                 handle,

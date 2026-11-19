@@ -95,7 +95,10 @@ fn property_names_schema(object: &CompiledObjectType) -> serde_json::Value {
 }
 
 /// Schema for an object search: the serialized query fields.
-pub(super) fn search_schema(object: &CompiledObjectType) -> serde_json::Value {
+pub(super) fn search_schema(
+    object: &CompiledObjectType,
+    max_query_limit: usize,
+) -> serde_json::Value {
     let mut fields = property_names_schema(object);
     fields["description"] =
         json!("Properties to return; the primary key is always included. Omit for all.");
@@ -103,10 +106,28 @@ pub(super) fn search_schema(object: &CompiledObjectType) -> serde_json::Value {
         "type": "object",
         "properties": {
             "filter": {"type": "object", "description": "Filter tree in Tesela's serialized form."},
-            "sort": {"type": "array", "items": {"type": "object"}},
-            "limit": {"type": "integer", "minimum": 1},
-            "offset": {"type": "integer", "minimum": 0},
-            "cursor": {"type": "string"},
+            "sort": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "property": {"type": "string"},
+                        "direction": {"type": "string", "enum": ["asc", "desc"]},
+                    },
+                    "required": ["property", "direction"],
+                    "additionalProperties": false,
+                },
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": max_query_limit,
+                "description": "Page size.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque token: the `next_cursor` of a previous page of the same query. Omit for the first page.",
+            },
             "fields": fields,
         },
         "additionalProperties": false,
@@ -187,7 +208,10 @@ pub(super) fn mutation_schema(object: &CompiledObjectType, suffix: &str) -> serd
 }
 
 /// Schema for a traversal from one source record along a link.
-pub(super) fn traverse_schema(source: Option<&CompiledObjectType>) -> serde_json::Value {
+pub(super) fn traverse_schema(
+    source: Option<&CompiledObjectType>,
+    max_limit: usize,
+) -> serde_json::Value {
     let source_key = source.map_or_else(|| json!({}), key_schema);
     json!({
         "type": "object",
@@ -195,8 +219,11 @@ pub(super) fn traverse_schema(source: Option<&CompiledObjectType>) -> serde_json
             "source_pk": source_key,
             "filter": {"type": "object", "description": "Filter over the target records."},
             "sort": {"type": "array", "items": {"type": "object"}},
-            "limit": {"type": "integer", "minimum": 1},
-            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": max_limit},
+            "cursor": {
+                "type": "string",
+                "description": "Opaque token: the `next_cursor` of a previous page of the same traversal. Omit for the first page.",
+            },
             "fields": {
                 "type": "array",
                 "items": {"type": "string"},

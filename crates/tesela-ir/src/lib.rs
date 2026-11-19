@@ -19,15 +19,18 @@
 //! The boundary between them is `tesela_runtime::compile`.
 
 mod action;
+pub mod cursor;
 mod data;
 mod declarative;
 mod filter;
 mod link;
 mod named_set;
 mod object_type;
+pub mod order;
 mod spec;
 
 pub use action::*;
+pub use cursor::{Cursor, KeysetPosition};
 pub use data::*;
 pub use declarative::*;
 pub use filter::*;

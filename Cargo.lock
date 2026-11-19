@@ -664,7 +664,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "tesela"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "serde",
@@ -679,9 +679,10 @@ dependencies = [
 
 [[package]]
 name = "tesela-backend"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
+ "hex",
  "serde",
  "serde_json",
  "tesela-core",
@@ -690,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "tesela-capability"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -700,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "tesela-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "serde",
@@ -709,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "tesela-ir"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "serde",
@@ -720,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "tesela-macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -733,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "tesela-py"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pyo3",
  "serde",
@@ -743,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "tesela-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "serde",

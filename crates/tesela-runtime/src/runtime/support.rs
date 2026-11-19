@@ -19,10 +19,58 @@ pub(super) fn object_backend<'a>(
         .and_then(Option::as_ref)
         .ok_or_else(|| Error::unsupported(format!("object '{}' is not bound", object.api_name())))
 }
-pub(super) fn effective_limit(requested: Option<i32>, maximum: usize) -> usize {
-    requested.map_or(maximum, |limit| {
-        usize::try_from(limit.max(0)).unwrap_or(0).min(maximum)
-    })
+/// Largest run of empty pages that still carry a cursor before a walk is
+/// declared stuck. A backend that keeps answering "nothing, but more" would
+/// otherwise spin forever.
+const MAX_EMPTY_PAGES: usize = 8;
+
+/// Termination guard for code that follows backend cursors to exhaustion.
+///
+/// A conforming backend returns a strictly advancing cursor, so a repeated
+/// cursor or a long run of empty pages means the backend is broken; the walk
+/// errors instead of looping.
+#[derive(Debug, Default)]
+pub(super) struct CursorWalk {
+    previous: Option<Cursor>,
+    empty_pages: usize,
+}
+
+impl CursorWalk {
+    /// Record one page and its continuation.
+    pub(super) fn advance(&mut self, empty: bool, next: Option<&Cursor>) -> Result<(), Error> {
+        let Some(next) = next else {
+            return Ok(());
+        };
+        self.empty_pages = if empty { self.empty_pages + 1 } else { 0 };
+        if self.previous.as_ref() == Some(next) || self.empty_pages > MAX_EMPTY_PAGES {
+            return Err(Error::adapter("backend cursor did not advance"));
+        }
+        self.previous = Some(next.clone());
+        Ok(())
+    }
+}
+
+/// [`effective_limit`] for a query's `i32` limit, as the `i32` the backend takes.
+pub(super) fn page_limit(requested: Option<i32>, maximum: usize) -> Result<i32, Error> {
+    let limit = effective_limit(requested.map(i64::from), maximum)?;
+    i32::try_from(limit).map_err(|_| Error::validation("max_query_limit exceeds i32::MAX"))
+}
+
+/// Resolve a page size: `None` is `maximum`, values in `1..=maximum` pass
+/// through, anything else is an explicit error. The limit bounds one page;
+/// `next_cursor` reaches every further row.
+pub(super) fn effective_limit(requested: Option<i64>, maximum: usize) -> Result<usize, Error> {
+    let Some(limit) = requested else {
+        return Ok(maximum);
+    };
+    usize::try_from(limit)
+        .ok()
+        .filter(|limit| (1..=maximum).contains(limit))
+        .ok_or_else(|| {
+            Error::validation(format!(
+                "limit must be between 1 and {maximum}; follow next_cursor for more rows"
+            ))
+        })
 }
 
 pub(super) fn ensure_approval(
@@ -41,6 +89,9 @@ pub(super) fn ensure_approval(
 }
 
 pub(super) fn check_query(object: &CompiledObjectType, query: &Query) -> Result<(), Error> {
+    if let Some(cursor) = &query.cursor {
+        cursor.check_token()?;
+    }
     if let Some(filter) = &query.filter {
         compile_filter(object, filter)?;
     }
@@ -50,6 +101,20 @@ pub(super) fn check_query(object: &CompiledObjectType, query: &Query) -> Result<
         }
     }
     check_fields(object, query.fields.as_deref())
+}
+
+/// Reject a sort on a property the caller may not read.
+///
+/// A keyset cursor carries the last row's sort values, so sorting by a
+/// redacted property would hand those values back through `next_cursor`.
+pub(super) fn check_sort_readable(sort: &[Sort], redactions: &[ApiName]) -> Result<(), Error> {
+    match sort.iter().find(|item| redactions.contains(&item.property)) {
+        Some(item) => Err(Error::policy_denied(format!(
+            "cannot sort by '{}': the property is redacted for this caller",
+            item.property
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Reject a field projection that names an undeclared property.

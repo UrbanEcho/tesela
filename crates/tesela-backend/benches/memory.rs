@@ -2,7 +2,7 @@
 //!
 //! The scenarios mirror the query shapes that dominate a real workload: an
 //! unfiltered page, an equality filter, a `LIKE` scan, an `IN` set, a sorted
-//! page, a deep offset and a grouped aggregation, each at two cardinalities so
+//! page, a deep keyset page and a grouped aggregation, each at two cardinalities so
 //! the growth curve is visible rather than a single point.
 //!
 //! They are deliberately stated in terms of the query, not the implementation,
@@ -24,7 +24,7 @@ use tesela_backend::{
     Mutation, Query, Sort, SortDirection,
 };
 use tesela_core::{ApiName, Error, ExecutionContext, FilterOp, Key, Principal, Value};
-use tesela_ir::Filter;
+use tesela_ir::{Cursor, Filter, Record};
 
 /// The two cardinalities every query shape is measured at.
 const SIZES: [usize; 2] = [10_000, 100_000];
@@ -133,11 +133,17 @@ fn search_cases(rows: usize) -> Vec<(&'static str, Query)> {
                 ..page(100)
             },
         ),
-        // A deep offset: the engine walks past most of the table.
+        // A deep keyset page: the cursor starts the scan near the end of the
+        // table, so the cost does not grow with depth.
         (
-            "deep_offset_limit_100",
+            "deep_keyset_limit_100",
             Query {
-                offset: Some((rows - 1_000) as i32),
+                cursor: Some(Cursor::encode(
+                    "customer",
+                    None,
+                    &[],
+                    &Record::new(customer_key(rows - 1_000), BTreeMap::new()),
+                )),
                 ..page(100)
             },
         ),

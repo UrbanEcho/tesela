@@ -23,7 +23,7 @@ The 2026-09-19 Apple M5 Pro baseline identified the architectural hot spots:
 | grouped count | 1.83 ms |
 | primary-key get | 206 ns |
 
-These figures are evidence, not portable thresholds. Acceptance is also algorithmic: an unsorted limited scan stops after `limit + 1`; `IN` is linear in rows; `LIKE` compiles once; sorted bounded search retains top-k references rather than cloned matches; aggregation memory scales with groups; snapshot reads are lock-free.
+These figures are evidence, not portable thresholds. Acceptance is also algorithmic: an unsorted limited scan stops after `limit + 1`, and a keyset page resumes from the cursor position (a range read when unsorted, bounded top-k otherwise) and also keeps at most `limit + 1` rows; `IN` is linear in rows; `LIKE` compiles once; sorted bounded search retains top-k references rather than cloned matches; aggregation memory scales with groups; snapshot reads are lock-free.
 
 ## Data-oriented engine measurements
 
@@ -36,12 +36,12 @@ Measured on the same Apple M5 Pro with `cargo bench -p tesela-backend --features
 | `LIKE` search → 100 | −6.5% | +6.6% |
 | 100-value `IN` → 100 | −65.7% | −77.5% |
 | sorted top-100 | −79.6% | −80.8% |
-| deep offset → 100 | −34.3% | −20.4% |
+| deep keyset → 100 | not re-measured | not re-measured |
 | count by tenant | −89.3% | −94.5% |
 | sum and max by region | −86.4% | −90.2% |
 | primary-key get | −4.0% | |
 
-The two unsorted/`LIKE` regressions are single-digit percentages on 10.7 µs and 18.7 µs medians, where the scan stops after 101 matches and the cost is fixed lookup overhead rather than throughput; the 10,000-row figures for the same queries are unchanged within noise or faster. New cases have no earlier baseline: an atomic batch of 10, 100 and 1,000 upserts costs 2.1 µs, 23.6 µs and 255 µs, and a link traversal returning 20 or 200 keys costs 90 ns or 382 ns at 10,000 or 100,000 rows, so it follows the result size rather than the table size.
+The two unsorted/`LIKE` regressions are single-digit percentages on 10.7 µs and 18.7 µs medians, where the scan stops after 101 matches and the cost is fixed lookup overhead rather than throughput; the 10,000-row figures for the same queries are unchanged within noise or faster. The earlier deep-offset row measured a pagination path that no longer exists; the keyset replacement has no recorded baseline yet. New cases have no earlier baseline: an atomic batch of 10, 100 and 1,000 upserts costs 2.1 µs, 23.6 µs and 255 µs, and a link traversal returning 20 or 200 keys costs 90 ns or 382 ns at 10,000 or 100,000 rows, so it follows the result size rather than the table size.
 
 The facade suite measures a closure repository whose scan clones its rows on every call, which dominates its repository figures: a 100-row page costs 59 µs at 1,000 rows and 393 µs at 10,000, equality 86 µs and 426 µs, top-100 138 µs and 704 µs, and a two-aggregate group-by 227 µs and 5.8 ms. The in-memory reference costs 15 µs, 21 µs, 56 µs and 22 µs at 1,000 rows. Read the repository figures as scan cost plus encoding of only the fields a query touches, not as a backend ceiling.
 

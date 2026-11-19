@@ -15,6 +15,12 @@ S = TypeVar("S")
 
 @dataclass(frozen=True, slots=True)
 class Page(Generic[T]):
+    """One page of results.
+
+    `next_cursor` is opaque: pass it unchanged to `after()` to resume strictly
+    after this page's last row. It is `None` exactly when no further row exists.
+    """
+
     items: tuple[T, ...]
     next_cursor: str | None = None
 
@@ -45,7 +51,7 @@ class Query(Generic[T]):
     predicates: tuple[Expr[bool], ...] = ()
     orders: tuple[Order, ...] = ()
     page_limit: int | None = None
-    page_offset: int | None = None
+    page_cursor: str | None = None
 
     def where(self, *predicates: Expr[bool]) -> Query[T]:
         if not predicates:
@@ -56,14 +62,13 @@ class Query(Generic[T]):
         return replace(self, orders=self.orders + orders)
 
     def limit(self, value: int) -> Query[T]:
-        if value < 0:
-            raise ValueError("limit must be non-negative")
+        if value < 1:
+            raise ValueError("limit must be at least 1")
         return replace(self, page_limit=value)
 
-    def offset(self, value: int) -> Query[T]:
-        if value < 0:
-            raise ValueError("offset must be non-negative")
-        return replace(self, page_offset=value)
+    def after(self, cursor: str) -> Query[T]:
+        """Resume strictly after the last row of a previous page's `next_cursor`."""
+        return replace(self, page_cursor=cursor)
 
     def group_by(self, *fields: str) -> Aggregate[T]:
         return Aggregate(self.model, self.predicates, fields)
@@ -75,8 +80,8 @@ class Query(Generic[T]):
             query["filter"] = filters[0] if len(filters) == 1 else {"op": "and", "args": filters}
         if self.page_limit is not None:
             query["limit"] = self.page_limit
-        if self.page_offset is not None:
-            query["offset"] = self.page_offset
+        if self.page_cursor is not None:
+            query["cursor"] = self.page_cursor
         return query
 
 
@@ -180,6 +185,7 @@ class Traverse(Generic[T]):
     predicates: tuple[Expr[bool], ...] = ()
     orders: tuple[Order, ...] = ()
     page_limit: int | None = None
+    page_cursor: str | None = None
 
     def where(self, *predicates: Expr[bool]) -> Traverse[T]:
         return replace(self, predicates=self.predicates + predicates)
@@ -189,6 +195,10 @@ class Traverse(Generic[T]):
 
     def limit(self, value: int) -> Traverse[T]:
         return replace(self, page_limit=value)
+
+    def after(self, cursor: str) -> Traverse[T]:
+        """Resume strictly after the last row of a previous page's `next_cursor`."""
+        return replace(self, page_cursor=cursor)
 
 
 def traverse(link: LinkDefinition[S, T], source_key: Any) -> Traverse[T]:

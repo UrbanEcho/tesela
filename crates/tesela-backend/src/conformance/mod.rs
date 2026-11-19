@@ -1,5 +1,9 @@
 //! Reusable behavioral checks for backend implementations.
 
+mod cursor;
+
+pub use cursor::{CursorFixture, SeedRows, verify_cursors};
+
 use std::collections::BTreeMap;
 
 use tesela_core::{ApiName, Error, ExecutionContext, Key, Principal, Value};

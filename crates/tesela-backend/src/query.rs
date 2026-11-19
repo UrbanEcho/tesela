@@ -1,13 +1,14 @@
 //! Query, policy, and execution request types.
 
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use tesela_core::{ApiName, ExecutionContext, Key, Operation, ResourceKind, Value};
-use tesela_ir::{Record, Revision};
+use tesela_ir::Revision;
 
-/// A search query.
+/// A search query. Unknown keys are rejected so a stale client field (for
+/// example a removed offset) fails loudly instead of being ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Query {
     /// Filter tree.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -15,15 +16,12 @@ pub struct Query {
     /// Sort directives.
     #[serde(default)]
     pub sort: Vec<Sort>,
-    /// Pagination limit.
+    /// Page size; must be >= 1.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub limit: Option<i32>,
-    /// Offset pagination start.
+    /// Opaque keyset cursor: resume strictly after a previous page's last row.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub offset: Option<i32>,
-    /// Cursor pagination token.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub cursor: Option<String>,
+    pub cursor: Option<tesela_ir::Cursor>,
     /// Properties to return. The primary key is always kept; `None` returns
     /// every property the caller may read.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -42,51 +40,7 @@ impl Query {
     }
 }
 
-/// A sort directive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Sort {
-    /// Property to sort by.
-    pub property: ApiName,
-    /// Sort direction.
-    pub direction: SortDirection,
-}
-
-/// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortDirection {
-    /// Ascending order.
-    Asc,
-    /// Descending order.
-    Desc,
-}
-
-/// Compare records by explicit sort keys with a primary-key tie breaker.
-///
-/// The tie breaker makes pagination and cross-backend merges deterministic.
-#[must_use]
-#[inline]
-pub fn compare_records(left: &Record, right: &Record, sort: &[Sort]) -> Ordering {
-    for item in sort {
-        let ordering = match (
-            left.values.get(&item.property),
-            right.values.get(&item.property),
-        ) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (Some(left), Some(right)) => left.cmp(right),
-        };
-        let ordering = match item.direction {
-            SortDirection::Asc => ordering,
-            SortDirection::Desc => ordering.reverse(),
-        };
-        if !ordering.is_eq() {
-            return ordering;
-        }
-    }
-    left.primary_key.cmp(&right.primary_key)
-}
+pub use tesela_ir::order::{Sort, SortDirection, compare_records};
 
 /// Mutation payload accepted by the runtime convenience API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,8 +156,9 @@ impl AggregationFunction {
 ///
 /// A traversal starts from one record and follows one link, so it carries the
 /// source key rather than a source filter: the record being traversed from is
-/// addressed, not searched for.
+/// addressed, not searched for. Unknown keys are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraversalQuery {
     /// Primary key of the source record.
     pub source_pk: Key,
@@ -213,12 +168,12 @@ pub struct TraversalQuery {
     /// Sort directives.
     #[serde(default)]
     pub sort: Vec<Sort>,
-    /// Limit.
+    /// Page size; must be >= 1.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub limit: Option<i32>,
-    /// Offset.
+    /// Opaque keyset cursor from a previous page.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub offset: Option<i32>,
+    pub cursor: Option<tesela_ir::Cursor>,
     /// Target properties to return; the primary key is always kept.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fields: Option<Vec<tesela_core::ApiName>>,
@@ -307,4 +262,21 @@ pub struct BackendCapabilities {
     pub batch: bool,
     /// Supports conditional revision checks.
     pub conditional_mutation: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Query, TraversalQuery};
+
+    #[test]
+    fn query_rejects_a_stale_offset_key() {
+        assert!(serde_json::from_str::<Query>(r#"{"offset":3}"#).is_err());
+        assert!(serde_json::from_str::<Query>(r#"{"limit":3}"#).is_ok());
+    }
+
+    #[test]
+    fn traversal_query_rejects_a_stale_offset_key() {
+        assert!(serde_json::from_str::<TraversalQuery>(r#"{"source_pk":1,"offset":3}"#).is_err());
+        assert!(serde_json::from_str::<TraversalQuery>(r#"{"source_pk":1,"limit":3}"#).is_ok());
+    }
 }

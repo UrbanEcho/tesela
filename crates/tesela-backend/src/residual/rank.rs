@@ -3,7 +3,9 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use tesela_core::Error;
+use tesela_core::{Error, Value};
+use tesela_ir::KeysetPosition;
+use tesela_ir::order::compare_slot;
 
 use super::access::RowAccess;
 use crate::{Sort, SortDirection};
@@ -29,23 +31,41 @@ impl<'a, A: RowAccess> Ranking<'a, A> {
         }
     }
 
-    /// Same order as `compare_records`: absent sorts first, direction flips the
-    /// value order, and the primary key breaks ties.
+    /// Same order as `compare_records`: missing and null form one class that
+    /// sorts first under `Asc`, direction flips the value order, and the
+    /// primary key breaks ties.
     fn compare(&self, left: &A::Row, right: &A::Row) -> Ordering {
         for (slot, direction) in &self.keys {
-            let ordering = self
-                .access
-                .value(left, slot)
-                .cmp(&self.access.value(right, slot));
-            let ordering = match direction {
-                SortDirection::Asc => ordering,
-                SortDirection::Desc => ordering.reverse(),
-            };
+            let ordering = compare_slot(
+                self.access.value(left, slot),
+                self.access.value(right, slot),
+                *direction,
+            );
             if ordering.is_ne() {
                 return ordering;
             }
         }
         self.access.key(left).cmp(self.access.key(right))
+    }
+
+    /// Order `row` relative to a decoded cursor position; `Greater` means the
+    /// row comes strictly after it. Uses the same slot comparison as
+    /// [`Ranking::compare`], so no record is built.
+    pub(crate) fn compare_to_position(&self, row: &A::Row, position: &KeysetPosition) -> Ordering {
+        for ((slot, direction), at) in self.keys.iter().zip(position.slots()) {
+            let ordering = compare_slot(self.access.value(row, slot), at.as_ref(), *direction);
+            if ordering.is_ne() {
+                return ordering;
+            }
+        }
+        self.access.key(row).cmp(position.primary_key())
+    }
+
+    /// The row's value for each sort key, in order.
+    pub(crate) fn values<'r>(&self, row: &'r A::Row) -> impl Iterator<Item = Option<&'r Value>> {
+        self.keys
+            .iter()
+            .map(|(slot, _)| self.access.value(row, slot))
     }
 }
 

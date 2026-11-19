@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tesela_backend::{
     AggregateQuery, Aggregation, AggregationFunction, Backend, BindingsBuilder, MemoryBackend,
-    PolicyDecision, PolicyEngine, PolicyRequest, TraversalQuery,
+    PolicyDecision, PolicyEngine, PolicyRequest, Query, Sort, SortDirection, TraversalQuery,
 };
 use tesela_core::{
     ApiName, DataType, Error, ErrorCode, ExecutionContext, FilterOp, Key, LinkCardinality,
@@ -90,6 +90,24 @@ fn get_enforces_row_filter_and_redaction() -> Result<(), Error> {
     assert!(!record.values.contains_key("email"));
     let denied = runtime.get(&context, &name("customer"), &Key::string("g"));
     assert!(denied.is_err_and(|error| error.is(ErrorCode::NotFound)));
+    Ok(())
+}
+
+#[test]
+fn search_rejects_sorting_by_a_redacted_property() -> Result<(), Error> {
+    let (runtime, context) = fixture()?;
+    let sorted_by = |property: &'static str| Query {
+        sort: vec![Sort {
+            property: name(property),
+            direction: SortDirection::Asc,
+        }],
+        limit: Some(1),
+        ..Query::default()
+    };
+    let denied = runtime.search(&context, &name("customer"), sorted_by("email"));
+    assert!(denied.is_err_and(|error| error.is(ErrorCode::PolicyDenied)));
+    let allowed = runtime.search(&context, &name("customer"), sorted_by("id"))?;
+    assert_eq!(allowed.output.records.len(), 1);
     Ok(())
 }
 
@@ -255,7 +273,7 @@ fn traversal_enforces_source_and_target_row_scopes() -> Result<(), Error> {
                 filter: None,
                 sort: Vec::new(),
                 limit: None,
-                offset: None,
+                cursor: None,
                 fields: None,
             },
         )?
@@ -270,10 +288,27 @@ fn traversal_enforces_source_and_target_row_scopes() -> Result<(), Error> {
             filter: None,
             sort: Vec::new(),
             limit: None,
-            offset: None,
+            cursor: None,
             fields: None,
         },
     );
     assert!(hidden_source.is_err_and(|error| error.is(ErrorCode::NotFound)));
+    // A redacted property cannot be a sort key: the cursor would carry it.
+    let redacted_sort = runtime.traverse(
+        &context,
+        &name("orders"),
+        TraversalQuery {
+            source_pk: Key::string("a"),
+            filter: None,
+            sort: vec![Sort {
+                property: name("email"),
+                direction: SortDirection::Asc,
+            }],
+            limit: Some(1),
+            cursor: None,
+            fields: None,
+        },
+    );
+    assert!(redacted_sort.is_err_and(|error| error.is(ErrorCode::PolicyDenied)));
     Ok(())
 }

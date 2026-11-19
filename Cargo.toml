@@ -12,7 +12,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Miguel Cárdenas"]
@@ -22,13 +22,13 @@ categories = ["data-structures"]
 readme = "README.md"
 
 [workspace.dependencies]
-tesela-core = { path = "crates/tesela-core", version = "0.2.0" }
-tesela-ir = { path = "crates/tesela-ir", version = "0.2.0" }
-tesela-backend = { path = "crates/tesela-backend", version = "0.2.0" }
-tesela-capability = { path = "crates/tesela-capability", version = "0.2.0" }
-tesela-runtime = { path = "crates/tesela-runtime", version = "0.2.0" }
-tesela-macros = { path = "crates/tesela-macros", version = "0.2.0" }
-tesela = { path = "crates/tesela", version = "0.2.0" }
+tesela-core = { path = "crates/tesela-core", version = "0.3.0" }
+tesela-ir = { path = "crates/tesela-ir", version = "0.3.0" }
+tesela-backend = { path = "crates/tesela-backend", version = "0.3.0" }
+tesela-capability = { path = "crates/tesela-capability", version = "0.3.0" }
+tesela-runtime = { path = "crates/tesela-runtime", version = "0.3.0" }
+tesela-macros = { path = "crates/tesela-macros", version = "0.3.0" }
+tesela = { path = "crates/tesela", version = "0.3.0" }
 
 serde = { version = "1", features = ["derive", "rc"] }
 arc-swap = "1"

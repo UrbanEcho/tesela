@@ -110,7 +110,11 @@ pub trait Backend: Send + Sync {
 
 /// Resolve a semantic link to target primary keys.
 pub trait LinkResolver: Send + Sync {
-    /// Resolve linked keys.
+    /// Resolve the complete list of linked keys.
+    ///
+    /// The list is the whole adjacency of `source`: materializing it is not
+    /// truncation, and traversal pages over the target rows built from it. A
+    /// resolver for very large adjacencies can become paged later.
     fn linked_keys(
         &self,
         context: &ExecutionContext,

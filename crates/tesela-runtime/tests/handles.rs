@@ -129,8 +129,39 @@ fn retained_results_are_paged_through_a_handle() -> Result<(), Error> {
         panic!("expected a page");
     };
     assert_eq!(page.records.len(), 1);
-    assert_eq!(page.next_cursor.as_deref(), Some("1"));
+    let cursor = page.next_cursor.clone().expect("a second row remains");
+    assert_ne!(
+        cursor.as_str(),
+        "1",
+        "the cursor is opaque, never an offset"
+    );
     assert!(!page.records[0].values.contains_key("team"));
+    let first = page.records[0].primary_key.clone();
+    let InvocationOutput::Page(rest) = invoke(
+        &runtime,
+        &context,
+        "results.read",
+        json!({"handle": id, "limit": 1, "cursor": cursor.as_str()}),
+        false,
+    )?
+    else {
+        panic!("expected a page");
+    };
+    assert_eq!(rest.records.len(), 1);
+    assert_ne!(rest.records[0].primary_key, first);
+    assert!(rest.next_cursor.is_none());
+    // Another handle rejects this handle's cursor.
+    let other = retain_red(&runtime, &context)?;
+    assert_ne!(other, id);
+    let error = invoke(
+        &runtime,
+        &context,
+        "results.read",
+        json!({"handle": other, "limit": 1, "cursor": cursor.as_str()}),
+        false,
+    )
+    .expect_err("foreign cursor");
+    assert_eq!(error.code(), ErrorCode::Validation);
     Ok(())
 }
 

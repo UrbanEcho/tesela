@@ -186,7 +186,7 @@ impl<T: Object> RawBackend for RepositoryAdapter<T> {
     fn search(
         &self,
         context: &ExecutionContext,
-        _object: &ApiName,
+        object: &ApiName,
         query: &RawQuery,
     ) -> Result<RawPage, Error> {
         let values = self
@@ -195,7 +195,13 @@ impl<T: Object> RawBackend for RepositoryAdapter<T> {
             .as_ref()
             .ok_or_else(|| Error::unsupported("scan"))?(context)?;
         let access = LazyAccess::<T>::new();
-        let page = raw::execute_rows(&access, values.map(|object| Ok(access.row(object))), query);
+        let page = raw::execute_rows(
+            &access,
+            values.map(|object| Ok(access.row(object))),
+            query,
+            object.as_str(),
+            raw::ScanOrder::Arbitrary,
+        );
         if let Some(error) = access.take_failure() {
             return Err(error);
         }
@@ -300,7 +306,14 @@ pub trait Native<T: Object>: Send + Sync {
     fn backend_type(&self) -> &str {
         "native"
     }
-    /// Search using a validated backend-level query.
+    /// Return the rows of one page of a validated backend-level query.
+    ///
+    /// The query carries the whole contract and no cursor: the pager already
+    /// folded the position into `filter` as an "after the last row" predicate.
+    /// Implementations must honour `filter`, return rows ordered by `sort` and
+    /// then by primary key ascending, and return at most `limit` rows
+    /// (the page size plus one, which tells whether another page exists).
+    /// Rows out of that order are rejected as a backend contract error.
     fn search(&self, context: &ExecutionContext, query: &RawQuery) -> Result<Vec<T>, Error>;
     /// Whether aggregate queries can be pushed down.
     fn supports_aggregate(&self) -> bool {
@@ -318,6 +331,7 @@ pub trait Native<T: Object>: Send + Sync {
 
 struct NativeAdapter<T: Object, B: Native<T>> {
     backend: B,
+    primary_key: ApiName,
     marker: PhantomData<fn() -> T>,
 }
 
@@ -328,6 +342,7 @@ pub struct NativeBackend<T: Object, B: Native<T>>(NativeAdapter<T, B>);
 pub fn native<T: Object, B: Native<T>>(backend: B) -> NativeBackend<T, B> {
     NativeBackend(NativeAdapter {
         backend,
+        primary_key: T::definition().primary_key,
         marker: PhantomData,
     })
 }
@@ -335,20 +350,6 @@ pub fn native<T: Object, B: Native<T>>(backend: B) -> NativeBackend<T, B> {
 impl<T: Object, B: Native<T> + 'static> ObjectBinding<T> for NativeBackend<T, B> {
     fn into_raw(self) -> Arc<dyn RawBackend> {
         Arc::new(self.0)
-    }
-}
-
-impl<T: Object, B: Native<T>> NativeAdapter<T, B> {
-    fn search_all(&self, context: &ExecutionContext, query: &RawQuery) -> Result<RawPage, Error> {
-        Ok(RawPage {
-            records: self
-                .backend
-                .search(context, query)?
-                .into_iter()
-                .map(record_from_object)
-                .collect::<Result<_, _>>()?,
-            next_cursor: None,
-        })
     }
 }
 
@@ -366,42 +367,15 @@ impl<T: Object, B: Native<T>> RawBackend for NativeAdapter<T, B> {
     fn search(
         &self,
         context: &ExecutionContext,
-        _object: &ApiName,
+        object: &ApiName,
         query: &RawQuery,
     ) -> Result<RawPage, Error> {
-        let Some(limit) = query.limit.map(|limit| usize::try_from(limit).unwrap_or(0)) else {
-            return self.search_all(context, query);
-        };
-        let offset = query
-            .cursor
-            .as_deref()
-            .and_then(|cursor| cursor.parse::<usize>().ok())
-            .or_else(|| {
-                query
-                    .offset
-                    .map(|offset| usize::try_from(offset).unwrap_or(0))
-            })
-            .unwrap_or_default();
-        // One extra row tells whether another page exists.
-        let window = RawQuery {
-            filter: query.filter.clone(),
-            sort: query.sort.clone(),
-            limit: Some(i32::try_from(limit.saturating_add(1)).unwrap_or(i32::MAX)),
-            offset: Some(i32::try_from(offset).unwrap_or(i32::MAX)),
-            cursor: None,
-            fields: None,
-        };
-        let mut records = self
-            .backend
-            .search(context, &window)?
-            .into_iter()
-            .map(record_from_object)
-            .collect::<Result<Vec<_>, _>>()?;
-        let has_more = records.len() > limit;
-        records.truncate(limit);
-        Ok(RawPage {
-            records,
-            next_cursor: has_more.then(|| offset.saturating_add(limit).to_string()),
+        raw::native_page(object.as_str(), &self.primary_key, query, |pushdown| {
+            self.backend
+                .search(context, pushdown)?
+                .into_iter()
+                .map(record_from_object)
+                .collect()
         })
     }
     fn aggregate(

@@ -10,14 +10,15 @@ use serde::{Deserialize, Serialize};
 use tesela_backend::{
     ActionExecutor, ActionRequest, AggregateQuery, Backend, Bindings, ExecutionEvent,
     ExecutionObserver, LinkResolver, Mutation, PolicyDecision, PolicyEngine, PolicyRequest, Query,
-    TraversalQuery, check_backend, compare_records,
+    Sort, TraversalQuery, check_backend, compare_records,
 };
 use tesela_core::{
     ApiName, Error, ErrorCode, ExecutionContext, Key, Operation, ResourceKind, SideEffectStatus,
     Value,
 };
 use tesela_ir::{
-    ActionResult, AggregateResult, Filter, MutationResult, Page, Record, SemanticFingerprint, Spec,
+    ActionResult, AggregateResult, Cursor, Filter, MutationResult, Page, Record,
+    SemanticFingerprint, Spec,
 };
 
 use crate::capability::{Capability, CapabilityCatalog, CapabilityInvocation, ToolExposure};
@@ -114,6 +115,7 @@ pub struct RuntimeBuilder {
     policy: Arc<dyn PolicyEngine>,
     observers: Vec<Arc<dyn ExecutionObserver>>,
     max_query_limit: usize,
+    max_retained_requests: usize,
 }
 
 impl RuntimeBuilder {
@@ -126,12 +128,23 @@ impl RuntimeBuilder {
             policy,
             observers: Vec::new(),
             max_query_limit: 1_000,
+            max_retained_requests: 256,
         }
     }
-    /// Set the hard row limit applied even when a query omits one.
+    /// Set the largest page size a query or read may ask for, and the page size
+    /// used when it omits one. It bounds a single page only; `next_cursor`
+    /// reaches every further row.
     #[must_use]
     pub fn max_query_limit(mut self, limit: usize) -> Self {
         self.max_query_limit = limit;
+        self
+    }
+    /// Set how many requests keep their result handles before the oldest
+    /// request is evicted (default 256). Reading a handle of an evicted request
+    /// reports that it expired rather than that it never existed.
+    #[must_use]
+    pub fn max_retained_requests(mut self, requests: usize) -> Self {
+        self.max_retained_requests = requests;
         self
     }
     /// Add an infallible observer.
@@ -145,6 +158,9 @@ impl RuntimeBuilder {
         if self.max_query_limit == 0 {
             return Err(Error::validation("max_query_limit must be positive"));
         }
+        if self.max_retained_requests == 0 {
+            return Err(Error::validation("max_retained_requests must be positive"));
+        }
         let snapshot = ExecutionSnapshot::compile(self.spec, &self.bindings, 1)?;
         Ok(Arc::new(Runtime {
             snapshot: ArcSwap::from_pointee(snapshot),
@@ -152,7 +168,7 @@ impl RuntimeBuilder {
             policy: self.policy,
             observers: self.observers.into(),
             max_query_limit: self.max_query_limit,
-            handles: results::HandleStore::default(),
+            handles: results::HandleStore::new(self.max_retained_requests),
         }))
     }
 }
@@ -278,6 +294,7 @@ mod project;
 mod results;
 mod schema;
 mod support;
+mod traverse;
 
 pub use invoke::InvocationOutput;
 pub use program::{ProgramOutput, StepReport};

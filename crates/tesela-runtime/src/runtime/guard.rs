@@ -2,7 +2,11 @@
 
 use super::*;
 
-/// Extra backend pages fetched to fill a page that the guard thinned out.
+/// Per-call work bound: extra backend pages fetched to fill a page that the
+/// guard thinned out. It limits work, never rows. The returned cursor is the
+/// cursor of the last backend page fetched, so a short or empty page that still
+/// carries `next_cursor` loses no rows: following it resumes exactly after the
+/// last row the guard inspected.
 const MAX_REFILLS: usize = 8;
 
 impl Runtime {
@@ -53,7 +57,6 @@ impl Runtime {
             let missing = wanted - records.len();
             let next = Query {
                 limit: Some(i32::try_from(missing).unwrap_or(i32::MAX)),
-                offset: None,
                 cursor: page.next_cursor.take(),
                 ..query.clone()
             };

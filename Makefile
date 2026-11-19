@@ -74,7 +74,8 @@ rust-package: ## Build all public .crate archives without publishing.
 	cargo package --workspace --exclude tesela-py --allow-dirty --no-verify
 
 .PHONY: python-test
-python-test: ## Install the extension and run Python tests.
+python-test: ## Rebuild the extension and run Python tests.
+	$(UV) sync --group dev --reinstall-package tesela
 	$(UV) run --group dev pytest python/tests/ -q
 
 .PHONY: python-typecheck

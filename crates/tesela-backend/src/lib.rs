@@ -9,6 +9,7 @@ mod aggregate;
 pub mod conformance;
 #[cfg(any(feature = "dev", test))]
 mod memory;
+mod native;
 mod query;
 mod residual;
 mod traits;
@@ -16,9 +17,10 @@ mod traits;
 pub use aggregate::AggregateAccumulator;
 #[cfg(any(feature = "dev", test))]
 pub use memory::MemoryBackend;
+pub use native::native_page;
 pub use query::*;
 pub use residual::{
-    RowAccess, RowPage, execute_residual, execute_residual_owned, execute_residual_try_owned,
-    execute_rows,
+    DEFAULT_PAGE_SIZE, RowAccess, RowPage, ScanOrder, execute_residual, execute_residual_owned,
+    execute_residual_try_owned, execute_rows,
 };
 pub use traits::*;

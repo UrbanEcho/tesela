@@ -8,7 +8,10 @@ use std::ops::Deref;
 /// A thin newtype around `serde_json::Value` that provides [`Ord`] support
 /// so that values can be used as keys in `BTreeMap` when needed.
 ///
-/// The ordering is best-effort: strings < numbers < booleans < null < arrays < objects.
+/// `Value` has a total order, consistent with its equality. Variants order as
+/// `null < bool < number < string < array < object`; within a variant, values
+/// compare naturally (arrays by length, then element-wise; objects by length,
+/// then entry-wise in key order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]

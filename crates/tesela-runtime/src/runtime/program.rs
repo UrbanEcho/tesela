@@ -44,11 +44,17 @@ impl Runtime {
     ) -> Result<Execution<ProgramOutput>, Error> {
         self.check_program(context, &program)?;
         let count = program.steps.len();
-        let mut results: Vec<(String, InvocationOutput)> = Vec::with_capacity(count);
+        let mut results: Vec<StepResult> = Vec::with_capacity(count);
         let mut reports: Vec<StepReport> = Vec::with_capacity(count);
         for (index, step) in program.steps.into_iter().enumerate() {
             let mut input = step.input.0;
-            resolve_step_refs(&mut input, &results)?;
+            self.resolve_step_refs(
+                context,
+                (program.generation, &program.fingerprint),
+                &mut input,
+                &results,
+            )?;
+            let resolved = input.clone();
             let last = index + 1 == count;
             let invocation = CapabilityInvocation {
                 generation: program.generation,
@@ -72,13 +78,19 @@ impl Runtime {
             })?;
             reports.push(StepReport {
                 id: step.id.clone(),
-                capability: step.capability,
+                capability: step.capability.clone(),
                 receipt: execution.receipt,
             });
-            results.push((step.id, execution.output));
+            results.push(StepResult {
+                id: step.id,
+                capability: step.capability,
+                input: resolved,
+                output: execution.output,
+            });
         }
-        let (_, result) = results
+        let result = results
             .pop()
+            .map(|step| step.output)
             .ok_or_else(|| Error::bad_request("a program needs at least one step"))?;
         let receipt = reports
             .last()
@@ -198,64 +210,120 @@ fn step_refs(input: &Json) -> Vec<String> {
     }
 }
 
-/// Replace `{"$ref": id, "field": name}` with the referenced step's values.
-fn resolve_step_refs(
-    input: &mut Json,
-    results: &[(String, InvocationOutput)],
-) -> Result<(), Error> {
-    match input {
-        Json::Object(map) if map.contains_key("$ref") => {
-            let id = map
-                .get("$ref")
-                .and_then(Json::as_str)
-                .ok_or_else(|| Error::validation("$ref must be a step id string"))?;
-            let field = map.get("field").and_then(Json::as_str);
-            let output = results
-                .iter()
-                .find(|(step, _)| step == id)
-                .map(|(_, output)| output)
-                .ok_or_else(|| Error::not_found("step result", id))?;
-            *input = Json::Array(referenced_values(output, field, id)?);
-        }
-        Json::Object(map) => {
-            for child in map.values_mut() {
-                resolve_step_refs(child, results)?;
-            }
-        }
-        Json::Array(items) => {
-            for child in items {
-                resolve_step_refs(child, results)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+/// A finished step: what it invoked, the input it ran with (references
+/// resolved), and what it produced.
+struct StepResult {
+    id: String,
+    capability: String,
+    input: Json,
+    output: InvocationOutput,
 }
 
-fn referenced_values(
-    output: &InvocationOutput,
-    field: Option<&str>,
-    id: &str,
-) -> Result<Vec<Json>, Error> {
-    let record_value = |record: &Record| match field {
-        Some(field) => record.get(field).map(|value| json!(value)),
-        None => Some(json!(record.primary_key)),
-    };
-    match output {
-        InvocationOutput::Page(page) => Ok(page.records.iter().filter_map(record_value).collect()),
-        InvocationOutput::Record(record) => Ok(record_value(record).into_iter().collect()),
-        InvocationOutput::Aggregate(result) => {
-            let field = field.ok_or_else(|| {
-                Error::validation(format!("referencing aggregate step {id} needs a field"))
-            })?;
-            Ok(result
-                .groups
-                .iter()
-                .filter_map(|group| group.get(field).map(|value| json!(value)))
-                .collect())
+impl Runtime {
+    /// Replace `{"$ref": id, "field": name}` with the referenced step's values.
+    fn resolve_step_refs(
+        &self,
+        context: &ExecutionContext,
+        identity: (u64, &SemanticFingerprint),
+        input: &mut Json,
+        results: &[StepResult],
+    ) -> Result<(), Error> {
+        match input {
+            Json::Object(map) if map.contains_key("$ref") => {
+                let id = map
+                    .get("$ref")
+                    .and_then(Json::as_str)
+                    .ok_or_else(|| Error::validation("$ref must be a step id string"))?;
+                let field = map.get("field").and_then(Json::as_str);
+                let step = results
+                    .iter()
+                    .find(|step| step.id == id)
+                    .ok_or_else(|| Error::not_found("step result", id))?;
+                *input = Json::Array(self.referenced_values(context, identity, step, field)?);
+            }
+            Json::Object(map) => {
+                for child in map.values_mut() {
+                    self.resolve_step_refs(context, identity, child, results)?;
+                }
+            }
+            Json::Array(items) => {
+                for child in items {
+                    self.resolve_step_refs(context, identity, child, results)?;
+                }
+            }
+            _ => {}
         }
-        _ => Err(Error::bad_request(format!(
-            "step {id} produced a result that cannot be referenced"
-        ))),
+        Ok(())
+    }
+
+    /// The values a reference to `step` expands to.
+    ///
+    /// A paged step is followed to completion: its search is re-issued through
+    /// the checked `invoke` path with the cursor set, so policy, guards and the
+    /// execution budget apply to every page. A budget error propagates; the
+    /// values are never truncated.
+    fn referenced_values(
+        &self,
+        context: &ExecutionContext,
+        identity: (u64, &SemanticFingerprint),
+        step: &StepResult,
+        field: Option<&str>,
+    ) -> Result<Vec<Json>, Error> {
+        let id = step.id.as_str();
+        let record_value = |record: &Record| match field {
+            Some(field) => record.get(field).map(|value| json!(value)),
+            None => Some(json!(record.primary_key)),
+        };
+        match &step.output {
+            InvocationOutput::Page(first) => {
+                let mut values: Vec<Json> = first.records.iter().filter_map(record_value).collect();
+                let mut next = first.next_cursor.clone();
+                let mut walk = CursorWalk::default();
+                while let Some(cursor) = next.take() {
+                    let mut input = step.input.clone();
+                    input
+                        .as_object_mut()
+                        .ok_or_else(|| Error::validation("step input must be an object"))?
+                        .insert("cursor".to_string(), json!(cursor));
+                    let execution = self.invoke(
+                        context,
+                        CapabilityInvocation {
+                            generation: identity.0,
+                            fingerprint: identity.1.clone(),
+                            capability: step.capability.clone(),
+                            input: Value::new(input),
+                            expected_revision: None,
+                            run_id: None,
+                            retain_results: false,
+                        },
+                    )?;
+                    let InvocationOutput::Page(page) = execution.output else {
+                        return Err(Error::internal(format!(
+                            "step {id} stopped producing pages while its cursor was followed"
+                        )));
+                    };
+                    // A guard can thin a page to nothing while the backend is still
+                    // advancing, so only a repeated cursor counts as stuck here.
+                    walk.advance(false, page.next_cursor.as_ref())?;
+                    values.extend(page.records.iter().filter_map(record_value));
+                    next = page.next_cursor;
+                }
+                Ok(values)
+            }
+            InvocationOutput::Record(record) => Ok(record_value(record).into_iter().collect()),
+            InvocationOutput::Aggregate(result) => {
+                let field = field.ok_or_else(|| {
+                    Error::validation(format!("referencing aggregate step {id} needs a field"))
+                })?;
+                Ok(result
+                    .groups
+                    .iter()
+                    .filter_map(|group| group.get(field).map(|value| json!(value)))
+                    .collect())
+            }
+            _ => Err(Error::bad_request(format!(
+                "step {id} produced a result that cannot be referenced"
+            ))),
+        }
     }
 }

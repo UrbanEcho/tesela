@@ -2,6 +2,7 @@
 
 use tesela_backend::{Query, SortDirection};
 use tesela_core::{Error, Value};
+use tesela_ir::Cursor;
 
 use super::{CompiledFilter, CompiledObjectType, FieldRef, compile_filter};
 
@@ -31,7 +32,7 @@ pub struct CompiledQuery {
     filter: Option<CompiledFilter>,
     sort: Box<[CompiledSort]>,
     limit: usize,
-    offset: usize,
+    cursor: Option<Cursor>,
 }
 
 impl CompiledQuery {
@@ -60,19 +61,20 @@ impl CompiledQuery {
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_boxed_slice();
-        let requested = query
-            .limit
-            .map_or(maximum_limit, |limit| limit.max(0) as usize);
-        let offset = query
-            .cursor
-            .as_deref()
-            .and_then(|cursor| cursor.parse().ok())
-            .unwrap_or_else(|| query.offset.unwrap_or_default().max(0) as usize);
+        let requested = match query.limit {
+            None => maximum_limit,
+            Some(limit) if limit >= 1 => limit as usize,
+            Some(limit) => {
+                return Err(Error::validation(format!(
+                    "limit must be >= 1 (got {limit}); it is the page size"
+                )));
+            }
+        };
         Ok(Self {
             filter,
             sort,
             limit: requested.min(maximum_limit),
-            offset,
+            cursor: query.cursor.clone(),
         })
     }
     /// Compiled predicate.
@@ -90,10 +92,10 @@ impl CompiledQuery {
     pub fn limit(&self) -> usize {
         self.limit
     }
-    /// Resolved offset or cursor position.
+    /// The opaque keyset cursor; the backend decodes it against its scope.
     #[must_use]
-    pub fn offset(&self) -> usize {
-        self.offset
+    pub fn cursor(&self) -> Option<&Cursor> {
+        self.cursor.as_ref()
     }
     /// Evaluate the residual predicate without reparsing it.
     #[must_use]
@@ -111,13 +113,19 @@ impl CompiledQuery {
 mod tests {
     use tesela_backend::{Query, Sort, SortDirection};
     use tesela_core::{ApiName, Value};
-    use tesela_ir::Filter;
+    use tesela_ir::{Filter, Record};
 
     use super::*;
 
     #[test]
     fn planning_resolves_fields_and_bounds_limits() {
         let object = crate::compile::tests::sample_object_type();
+        let cursor = Cursor::encode(
+            "customer",
+            None,
+            &[],
+            &Record::new(tesela_core::Key::I64(7), Default::default()),
+        );
         let plan = CompiledQuery::compile(
             &object,
             &Query {
@@ -127,16 +135,27 @@ mod tests {
                     direction: SortDirection::Desc,
                 }],
                 limit: Some(500),
-                offset: Some(3),
-                cursor: None,
+                cursor: Some(cursor.clone()),
                 fields: None,
             },
             100,
         )
         .expect("query compiles");
         assert_eq!(plan.limit(), 100);
-        assert_eq!(plan.offset(), 3);
+        assert_eq!(plan.cursor(), Some(&cursor));
         assert_eq!(plan.sort()[0].field().name().as_str(), "name");
         assert!(plan.matches(&[(ApiName::from("name"), Value::string("Acme"))].into()));
+    }
+
+    #[test]
+    fn non_positive_limits_are_rejected() {
+        let object = crate::compile::tests::sample_object_type();
+        for limit in [0, -1] {
+            let query = Query {
+                limit: Some(limit),
+                ..Query::default()
+            };
+            assert!(CompiledQuery::compile(&object, &query, 100).is_err());
+        }
     }
 }

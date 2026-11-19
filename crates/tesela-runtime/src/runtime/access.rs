@@ -37,7 +37,7 @@ impl Runtime {
         if let Some(filter) = decision.row_filter {
             effective = effective.and_filter(filter);
         }
-        effective.limit = Some(effective_limit(effective.limit, self.max_query_limit) as i32);
+        effective.limit = Some(page_limit(effective.limit, self.max_query_limit)?);
         let compiled = CompiledQuery::compile(object_type, &effective, self.max_query_limit)?;
         let backend = object_backend(&snapshot, object_type)?;
         let capabilities = backend.capabilities();

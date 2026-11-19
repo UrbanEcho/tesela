@@ -40,6 +40,8 @@ struct PythonBackend {
     object: Py<PyAny>,
     capabilities: BackendCapabilities,
     scan: bool,
+    /// Property holding the primary key, needed to push a keyset position down.
+    primary_key: ApiName,
 }
 impl Backend for PythonBackend {
     fn backend_type(&self) -> &str {
@@ -57,9 +59,19 @@ impl Backend for PythonBackend {
         let payload = serde_json::json!({"context":context_payload(context),"object_type":object,"query":query});
         if self.scan {
             let records: Vec<Record> = callback(&self.object, "scan", payload)?;
-            tesela::raw::execute_residual(records.iter(), query)
+            tesela::raw::execute_residual(
+                records.iter(),
+                query,
+                object.as_str(),
+                tesela::raw::ScanOrder::Arbitrary,
+            )
         } else {
-            callback(&self.object, "search", payload)
+            // The host returns one page of rows under the pushed-down keyset
+            // filter; the cursor is derived here, never reported by Python.
+            tesela::raw::native_page(object.as_str(), &self.primary_key, query, |pushdown| {
+                let payload = serde_json::json!({"context":context_payload(context),"object_type":object,"query":pushdown});
+                callback::<Page>(&self.object, "search", payload).map(|page| page.records)
+            })
         }
     }
     fn get(
@@ -234,6 +246,11 @@ impl NativeRuntime {
         let mut bindings = BindingsBuilder::new();
         for (key, value) in objects {
             let object = name(&key.extract::<String>()?)?;
+            let object_name = object.to_string();
+            let primary_key = spec
+                .object_types
+                .get(object.as_str())
+                .map(|declared| declared.primary_key.clone());
             let backend: Arc<dyn Backend> =
                 if let Ok(memory) = value.extract::<PyRef<'_, NativeMemoryBackend>>() {
                     memory.inner.clone()
@@ -252,7 +269,13 @@ impl NativeRuntime {
                                 && Python::attach(|py| object.bind(py).hasattr(method))
                                     .unwrap_or(false))
                     };
+                    let primary_key = primary_key.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "object '{object_name}' is bound to a backend but not declared in the spec"
+                    ))
+                })?;
                     Arc::new(PythonBackend {
+                        primary_key,
                         capabilities: BackendCapabilities {
                             search: has("search") || has("scan"),
                             get: has("get"),

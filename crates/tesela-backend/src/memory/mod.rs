@@ -1,6 +1,7 @@
 //! In-memory backend for tests, examples and local development.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -8,7 +9,7 @@ use tesela_core::{ApiName, Error, ExecutionContext, Key, Value, lock_read, lock_
 use tesela_ir::{AggregateResult, MutationResult, Page, Record, Revision};
 
 use crate::aggregate::Aggregator;
-use crate::residual::{Predicate, execute_rows};
+use crate::residual::{Predicate, ScanOrder, execute_rows};
 use crate::{AggregateQuery, Backend, BackendCapabilities, LinkResolver, Mutation, Query};
 
 mod batch;
@@ -117,7 +118,28 @@ impl Backend for MemoryBackend {
             return Ok(Page::default());
         };
         let table = lock_read(&table)?;
-        let page = execute_rows(&Columns(&table), table.rows.values().map(Ok), query)?;
+        let scope = object_type.as_str();
+        // An unsorted walk is ordered by primary key, so a cursor becomes a
+        // range start and a deep page costs O(log n + limit).
+        let start = match (&query.cursor, query.sort.is_empty()) {
+            (Some(cursor), true) => Bound::Excluded(
+                cursor
+                    .decode(scope, query.filter.as_ref(), &query.sort)?
+                    .primary_key()
+                    .clone(),
+            ),
+            _ => Bound::Unbounded,
+        };
+        let page = execute_rows(
+            &Columns(&table),
+            table
+                .rows
+                .range((start, Bound::Unbounded))
+                .map(|(_, row)| Ok(row)),
+            query,
+            scope,
+            ScanOrder::PrimaryKey,
+        )?;
         Ok(Page {
             records: page.rows.into_iter().map(|row| table.record(row)).collect(),
             next_cursor: page.next_cursor,
